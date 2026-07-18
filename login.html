@@ -42,19 +42,21 @@
       <p style="font-size:14px;color:#9ca3af;margin:0;">Retrouvez vos clips et vos projets en cours</p>
     </div>
 
-    <form action="#" method="post" style="background:#17171d;border:1px solid #2a2a35;border-radius:20px;padding:28px;box-sizing:border-box;">
+    <div id="error-box" style="display:none;background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.4);color:#fca5a5;font-size:13px;padding:12px 14px;border-radius:10px;margin-bottom:16px;"></div>
+
+    <form id="login-form" style="background:#17171d;border:1px solid #2a2a35;border-radius:20px;padding:28px;box-sizing:border-box;">
       <label style="display:block;font-size:13px;color:#d1d5db;margin-bottom:6px;">Adresse e-mail</label>
-      <input type="email" name="email" required placeholder="vous@exemple.com"
+      <input type="email" name="email" id="email" required placeholder="vous@exemple.com"
         style="width:100%;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:14px;padding:12px 14px;border-radius:10px;box-sizing:border-box;margin-bottom:18px;" />
 
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
         <label style="font-size:13px;color:#d1d5db;">Mot de passe</label>
         <a href="#" style="font-size:12px;color:#9ca3af;">Mot de passe oublié ?</a>
       </div>
-      <input type="password" name="password" required placeholder="Votre mot de passe"
+      <input type="password" name="password" id="password" required placeholder="Votre mot de passe"
         style="width:100%;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:14px;padding:12px 14px;border-radius:10px;box-sizing:border-box;margin-bottom:22px;" />
 
-      <button type="submit" class="login-btn"
+      <button type="submit" id="login-submit" class="login-btn"
         style="width:100%;background:#f43f8e;color:#fff;font-weight:700;font-size:14px;padding:13px;border:none;border-radius:9999px;cursor:pointer;">
         Se connecter
       </button>
@@ -66,10 +68,55 @@
       <div style="flex:1;height:1px;background:#2a2a35;"></div>
     </div>
 
-    <a href="#" style="display:flex;align-items:center;justify-content:center;gap:10px;background:#17171d;border:1px solid #2a2a35;color:#fff;font-size:14px;font-weight:600;padding:12px;border-radius:9999px;">
+    <button id="google-login" style="width:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:#17171d;border:1px solid #2a2a35;color:#fff;font-size:14px;font-weight:600;padding:12px;border-radius:9999px;cursor:pointer;">
       Continuer avec Google
-    </a>
+    </button>
   </div>
 </section>
+
+<script type="module">
+  import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+  import { SUPABASE_URL, SUPABASE_ANON_KEY } from './supabase-config.js';
+
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  const errorBox = document.getElementById('error-box');
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.style.display = 'block';
+  }
+
+  document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorBox.style.display = 'none';
+    const submitBtn = document.getElementById('login-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Connexion...';
+
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Se connecter';
+
+    if (error) {
+      showError(error.message);
+      return;
+    }
+
+    window.location.href = 'index.html';
+  });
+
+  document.getElementById('google-login').addEventListener('click', async () => {
+    errorBox.style.display = 'none';
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin + '/index.html' }
+    });
+    if (error) showError(error.message);
+  });
+</script>
 </body>
 </html>
