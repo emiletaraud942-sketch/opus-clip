@@ -102,7 +102,13 @@
     submitBtn.textContent = 'Se connecter';
 
     if (error) {
-      showError(error.message);
+      if (error.message === 'Email not confirmed') {
+        showError("Ton adresse e-mail n'est pas encore confirmée. Vérifie ta boîte mail et clique sur le lien reçu.");
+      } else if (error.message === 'Invalid login credentials') {
+        showError("E-mail ou mot de passe incorrect.");
+      } else {
+        showError(error.message);
+      }
       return;
     }
 

@@ -43,6 +43,7 @@
     </div>
 
     <div id="error-box" style="display:none;background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.4);color:#fca5a5;font-size:13px;padding:12px 14px;border-radius:10px;margin-bottom:16px;"></div>
+    <div id="success-box" style="display:none;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.4);color:#86efac;font-size:13px;padding:12px 14px;border-radius:10px;margin-bottom:16px;"></div>
 
     <form id="signup-form" style="background:#17171d;border:1px solid #2a2a35;border-radius:20px;padding:28px;box-sizing:border-box;">
       <label style="display:block;font-size:13px;color:#d1d5db;margin-bottom:6px;">Nom complet</label>
@@ -87,14 +88,22 @@
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
   const errorBox = document.getElementById('error-box');
+  const successBox = document.getElementById('success-box');
   function showError(message) {
+    successBox.style.display = 'none';
     errorBox.textContent = message;
     errorBox.style.display = 'block';
+  }
+  function showSuccess(message) {
+    errorBox.style.display = 'none';
+    successBox.textContent = message;
+    successBox.style.display = 'block';
   }
 
   document.getElementById('signup-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     errorBox.style.display = 'none';
+    successBox.style.display = 'none';
     const submitBtn = document.getElementById('signup-submit');
     submitBtn.disabled = true;
     submitBtn.textContent = 'Création du compte...';
@@ -103,7 +112,7 @@
     const email = document.getElementById('email').value;
     const password = document.getElementById('password').value;
 
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: { data: { full_name: name } }
@@ -117,7 +126,13 @@
       return;
     }
 
-    window.location.href = 'index.html';
+    if (data.session) {
+      window.location.href = 'index.html';
+      return;
+    }
+
+    document.getElementById('signup-form').reset();
+    showSuccess("Compte créé ! Vérifie ta boîte mail et clique sur le lien de confirmation avant de te connecter.");
   });
 
   document.getElementById('google-signup').addEventListener('click', async () => {
