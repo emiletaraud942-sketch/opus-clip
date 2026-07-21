@@ -40,12 +40,31 @@
         <span style="width:6px;height:6px;border-radius:50%;background:#f43f8e;"></span> IA de repurposing vidéo
       </div>
       <h1 style="font-family:'Space Grotesk',sans-serif;font-size:46px;font-weight:700;line-height:1.15;margin:0 0 20px;">Une longue vidéo. Des clips prêts à poster, en minutes.</h1>
-      <p style="font-size:16px;color:#9ca3af;margin:0 0 32px;">Collez le lien de votre podcast, stream ou webinar. Notre IA repère les meilleurs moments, sous-titre et recadre automatiquement pour TikTok, Reels et Shorts.</p>
-      <div style="display:flex;gap:10px;align-items:center;background:#17171d;border:1px solid #2a2a35;border-radius:9999px;padding:6px 6px 6px 20px;margin-bottom:14px;">
-        <input style="flex:1;background:transparent;border:none;color:#d1d5db;font-size:14px;outline:none;" placeholder="Colle le lien de ta vidéo (YouTube, Drive, MP4...)" />
-        <a href="signup.html" style="background:#f43f8e;color:#fff;font-weight:700;font-size:13px;padding:11px 22px;border-radius:9999px;white-space:nowrap;">S'inscrire gratuitement</a>
+      <p style="font-size:16px;color:#9ca3af;margin:0 0 32px;">Importez votre podcast, stream ou webinar. Notre IA repère les meilleurs moments, sous-titre et recadre automatiquement pour TikTok, Reels et Shorts.</p>
+
+      <label for="video-upload" style="display:flex;align-items:center;gap:12px;background:#17171d;border:1px dashed #3a3a48;border-radius:16px;padding:18px 20px;margin-bottom:12px;cursor:pointer;">
+        <div style="width:36px;height:36px;background:rgba(244,63,142,.12);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">⬆️</div>
+        <div style="flex:1;">
+          <div style="font-size:14px;font-weight:700;">Importer un fichier vidéo</div>
+          <div style="font-size:12px;color:#9ca3af;" id="upload-filename">MP4, MOV — depuis votre ordinateur</div>
+        </div>
+        <span style="background:#f43f8e;color:#fff;font-weight:700;font-size:13px;padding:11px 22px;border-radius:9999px;white-space:nowrap;">Choisir un fichier</span>
+        <input id="video-upload" type="file" accept="video/*" style="display:none;" />
+      </label>
+
+      <div style="font-size:12px;color:#6b7280;margin-bottom:20px;">Aucune carte bancaire requise · 3 vidéos offertes</div>
+
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px;">
+        <div style="flex:1;height:1px;background:#2a2a35;"></div>
+        <span style="font-size:12px;color:#6b7280;">ou</span>
+        <div style="flex:1;height:1px;background:#2a2a35;"></div>
       </div>
-      <div style="font-size:12px;color:#6b7280;">Aucune carte bancaire requise · 3 vidéos offertes</div>
+
+      <div style="display:flex;gap:10px;align-items:center;background:#17171d;border:1px solid #2a2a35;border-radius:9999px;padding:6px 6px 6px 20px;margin-bottom:10px;">
+        <input style="flex:1;background:transparent;border:none;color:#d1d5db;font-size:14px;outline:none;" placeholder="Colle le lien de ta propre vidéo YouTube" />
+        <a href="signup.html" style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-weight:700;font-size:13px;padding:11px 22px;border-radius:9999px;white-space:nowrap;">Utiliser ce lien</a>
+      </div>
+      <div style="font-size:11px;color:#6b7280;line-height:1.6;">Réservé aux vidéos dont vous êtes propriétaire ou titulaire des droits (ex. votre propre podcast). Voir nos <a href="cgu.html" style="color:#9ca3af;text-decoration:underline;">Conditions d'utilisation</a>.</div>
     </div>
     <div style="position:relative;width:280px;height:500px;flex-shrink:0;">
       <div style="position:absolute;inset:24px 8px 0 8px;background:#1a1a22;border-radius:20px;transform:rotate(4deg);"></div>
@@ -68,6 +87,13 @@
   import { SUPABASE_URL, SUPABASE_ANON_KEY } from './supabase-config.js';
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  document.getElementById('video-upload').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    document.getElementById('upload-filename').textContent = file
+      ? file.name
+      : 'MP4, MOV — depuis votre ordinateur';
+  });
   const authArea = document.getElementById('auth-area');
 
   function renderLoggedIn(user) {
