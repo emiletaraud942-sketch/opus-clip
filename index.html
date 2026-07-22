@@ -92,6 +92,7 @@
 <script type="module">
   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   import { SUPABASE_URL, SUPABASE_ANON_KEY } from './supabase-config.js';
+  import { MODAL_PROCESS_URL } from './modal-config.js';
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -130,49 +131,71 @@
   });
 
   async function startProcessing(path, accessToken) {
-    const { data, error } = await supabase.functions.invoke('process-video', {
-      body: { path },
-      headers: { Authorization: `Bearer ${accessToken}` },
+    const res = await fetch(MODAL_PROCESS_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ path }),
     });
 
-    if (error) {
-      showUploadStatus(`Échec du lancement du traitement : ${error.message}`, '#fca5a5');
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      showUploadStatus(`Échec du lancement du traitement : ${body.error ?? res.statusText}`, '#fca5a5');
       return;
     }
 
-    showUploadStatus('Analyse en cours par l\'IA (2-5 minutes)...', '#9ca3af');
-    pollForClips(data.projectId, accessToken);
+    showUploadStatus("Analyse en cours (transcription, sélection des moments, montage) — 2 à 5 minutes...", '#9ca3af');
+    pollForClips(path);
   }
 
-  function pollForClips(projectId, accessToken) {
+  function pollForClips(sourcePath) {
     const interval = setInterval(async () => {
-      const { data, error } = await supabase.functions.invoke('clip-status', {
-        body: { projectId },
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
+      const { data: job } = await supabase
+        .from('clip_jobs')
+        .select('status, error')
+        .eq('source_path', sourcePath)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-      if (error) {
+      if (!job) return;
+
+      if (job.status === 'error') {
         clearInterval(interval);
-        showUploadStatus(`Erreur pendant le traitement : ${error.message}`, '#fca5a5');
+        showUploadStatus(`Erreur pendant le traitement : ${job.error ?? 'inconnue'}`, '#fca5a5');
         return;
       }
 
-      if (data.status === 'done') {
+      if (job.status === 'done') {
         clearInterval(interval);
-        showUploadStatus(`${data.clips.length} clip(s) généré(s) !`, '#86efac');
-        renderClips(data.clips);
+        const { data: clips } = await supabase
+          .from('clips')
+          .select('*')
+          .eq('source_path', sourcePath)
+          .order('score', { ascending: false });
+
+        showUploadStatus(`${clips.length} clip(s) généré(s) !`, '#86efac');
+        await renderClips(clips ?? []);
       }
-    }, 20000);
+    }, 15000);
   }
 
-  function renderClips(clips) {
+  async function renderClips(clips) {
     const resultsBox = document.getElementById('clips-results');
     const list = document.getElementById('clips-list');
     resultsBox.style.display = 'block';
-    list.innerHTML = clips.map(c => `
-      <a href="${c.videoUrl}" target="_blank" style="display:flex;justify-content:space-between;align-items:center;background:#17171d;border:1px solid #2a2a35;border-radius:12px;padding:12px 16px;text-decoration:none;color:#fff;">
+
+    const rows = await Promise.all(clips.map(async (c) => {
+      const { data } = await supabase.storage.from('clips').createSignedUrl(c.storage_path, 3600);
+      return { ...c, url: data?.signedUrl };
+    }));
+
+    list.innerHTML = rows.map(c => `
+      <a href="${c.url ?? '#'}" target="_blank" style="display:flex;justify-content:space-between;align-items:center;background:#17171d;border:1px solid #2a2a35;border-radius:12px;padding:12px 16px;text-decoration:none;color:#fff;">
         <span style="font-size:13px;">${c.title ?? 'Clip généré'}</span>
-        <span style="background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;">${c.viralScore ?? '?'} · score viral</span>
+        <span style="background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;">${c.score ?? '?'} · score viral</span>
       </a>
     `).join('');
   }

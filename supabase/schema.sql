@@ -4,21 +4,21 @@ create table if not exists clip_jobs (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   source_path text not null,
-  project_id text not null,
   status text not null default 'processing',
+  error text,
   created_at timestamptz not null default now()
 );
 
 create table if not exists clips (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  project_id text not null,
-  video_id text,
+  source_path text not null,
+  storage_path text not null,
   title text,
-  video_url text,
-  viral_score int,
-  viral_reason text,
-  transcript text,
+  score int,
+  reason text,
+  start_time numeric,
+  end_time numeric,
   created_at timestamptz not null default now()
 );
 
