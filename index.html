@@ -63,8 +63,8 @@
       </div>
 
       <div style="display:flex;gap:10px;align-items:center;background:#17171d;border:1px solid #2a2a35;border-radius:9999px;padding:6px 6px 6px 20px;margin-bottom:10px;">
-        <input style="flex:1;background:transparent;border:none;color:#d1d5db;font-size:14px;outline:none;" placeholder="Colle le lien de ta propre vidéo YouTube" />
-        <a href="signup.html" style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-weight:700;font-size:13px;padding:11px 22px;border-radius:9999px;white-space:nowrap;">Utiliser ce lien</a>
+        <input id="youtube-url" style="flex:1;background:transparent;border:none;color:#d1d5db;font-size:14px;outline:none;" placeholder="Colle le lien de ta propre vidéo YouTube" />
+        <button id="youtube-submit" style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-weight:700;font-size:13px;padding:11px 22px;border-radius:9999px;white-space:nowrap;cursor:pointer;">Utiliser ce lien</button>
       </div>
       <div style="font-size:11px;color:#6b7280;line-height:1.6;">Réservé aux vidéos dont vous êtes propriétaire ou titulaire des droits (ex. votre propre podcast). Voir nos <a href="cgu.html" style="color:#9ca3af;text-decoration:underline;">Conditions d'utilisation</a>.</div>
 
@@ -127,27 +127,43 @@
     }
 
     showUploadStatus('Vidéo importée, lancement du traitement IA...', '#9ca3af');
-    await startProcessing(path, session.access_token);
+    await startProcessing({ path }, session.access_token);
   });
 
-  async function startProcessing(path, accessToken) {
+  document.getElementById('youtube-submit').addEventListener('click', async () => {
+    const url = document.getElementById('youtube-url').value.trim();
+    if (!url) return;
+
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      showUploadStatus('Crée un compte gratuit pour utiliser un lien YouTube.', '#fca5a5');
+      window.location.href = 'signup.html';
+      return;
+    }
+
+    showUploadStatus('Lancement du traitement IA...', '#9ca3af');
+    await startProcessing({ youtubeUrl: url }, session.access_token);
+  });
+
+  async function startProcessing(body, accessToken) {
     const res = await fetch(MODAL_PROCESS_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${accessToken}`,
       },
-      body: JSON.stringify({ path }),
+      body: JSON.stringify(body),
     });
 
+    const data = await res.json().catch(() => ({}));
+
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      showUploadStatus(`Échec du lancement du traitement : ${body.error ?? res.statusText}`, '#fca5a5');
+      showUploadStatus(`Échec du lancement du traitement : ${data.error ?? res.statusText}`, '#fca5a5');
       return;
     }
 
     showUploadStatus("Analyse en cours (transcription, sélection des moments, montage) — 2 à 5 minutes...", '#9ca3af');
-    pollForClips(path);
+    pollForClips(data.sourcePath);
   }
 
   function pollForClips(sourcePath) {

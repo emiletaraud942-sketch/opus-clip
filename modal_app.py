@@ -45,6 +45,7 @@ image = (
         "supabase==2.7.4",
         "fastapi[standard]",
         "requests==2.32.3",
+        "yt-dlp==2024.10.7",
     )
 )
 
@@ -73,6 +74,19 @@ def verify_user_token(token: str) -> str | None:
     if res.status_code != 200:
         return None
     return res.json().get("id")
+
+
+def download_youtube(url: str, out_path: str):
+    import yt_dlp
+
+    opts = {
+        "format": "mp4/bestvideo+bestaudio",
+        "outtmpl": out_path,
+        "merge_output_format": "mp4",
+        "quiet": True,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
 
 
 def transcribe(video_path: str):
@@ -195,7 +209,7 @@ def render_clip(source_path: str, clip: dict, words: list, out_path: str):
 
 
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=2400)
-def process_video(user_id: str, source_path: str):
+def process_video(user_id: str, source_path: str, youtube_url: str | None = None):
     supabase = get_supabase_client()
     supabase.table("clip_jobs").insert({
         "user_id": user_id, "source_path": source_path, "status": "processing",
@@ -204,8 +218,12 @@ def process_video(user_id: str, source_path: str):
     try:
         with tempfile.TemporaryDirectory() as tmp:
             local_video = os.path.join(tmp, "source.mp4")
-            video_bytes = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
-            Path(local_video).write_bytes(video_bytes)
+
+            if youtube_url:
+                download_youtube(youtube_url, local_video)
+            else:
+                video_bytes = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
+                Path(local_video).write_bytes(video_bytes)
 
             words, full_text = transcribe(local_video)
             clips = select_clips_with_llm(words, full_text)
@@ -244,18 +262,25 @@ def process_video(user_id: str, source_path: str):
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")])
 @modal.fastapi_endpoint(method="POST")
 def process(payload: dict, request: Request):
-    """Endpoint HTTP appelé par le site après un upload réussi.
+    """Endpoint HTTP appelé par le site après un upload réussi, ou pour un lien YouTube.
     Header requis : Authorization: Bearer <token utilisateur Supabase>
-    Body attendu : {"path": "user_id/xxx.mp4"}"""
+    Body attendu : {"path": "user_id/xxx.mp4"} pour un fichier importé,
+    ou {"youtubeUrl": "https://youtube.com/..."} pour un lien."""
     auth_header = request.headers.get("authorization", "")
     token = auth_header.replace("Bearer ", "")
     user_id = verify_user_token(token)
     if not user_id:
         return JSONResponse({"error": "Non authentifié"}, status_code=401)
 
+    youtube_url = payload.get("youtubeUrl")
+    if youtube_url:
+        source_path = f"{user_id}/youtube_{int(time.time())}"
+        process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url)
+        return {"status": "processing_started", "sourcePath": source_path}
+
     source_path = payload["path"]
     if not source_path.startswith(f"{user_id}/"):
         return JSONResponse({"error": "Chemin invalide"}, status_code=403)
 
     process_video.spawn(user_id=user_id, source_path=source_path)
-    return {"status": "processing_started"}
+    return {"status": "processing_started", "sourcePath": source_path}
