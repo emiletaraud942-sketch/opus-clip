@@ -67,6 +67,11 @@
         <a href="signup.html" style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-weight:700;font-size:13px;padding:11px 22px;border-radius:9999px;white-space:nowrap;">Utiliser ce lien</a>
       </div>
       <div style="font-size:11px;color:#6b7280;line-height:1.6;">Réservé aux vidéos dont vous êtes propriétaire ou titulaire des droits (ex. votre propre podcast). Voir nos <a href="cgu.html" style="color:#9ca3af;text-decoration:underline;">Conditions d'utilisation</a>.</div>
+
+      <div id="clips-results" style="display:none;margin-top:28px;">
+        <div style="font-size:14px;font-weight:700;margin-bottom:12px;">Tes clips générés</div>
+        <div id="clips-list" style="display:flex;flex-direction:column;gap:10px;"></div>
+      </div>
     </div>
     <div style="position:relative;width:280px;height:500px;flex-shrink:0;">
       <div style="position:absolute;inset:24px 8px 0 8px;background:#1a1a22;border-radius:20px;transform:rotate(4deg);"></div>
@@ -120,8 +125,57 @@
       return;
     }
 
-    showUploadStatus('Vidéo importée ! Traitement par l\'IA à venir.', '#86efac');
+    showUploadStatus('Vidéo importée, lancement du traitement IA...', '#9ca3af');
+    await startProcessing(path, session.access_token);
   });
+
+  async function startProcessing(path, accessToken) {
+    const { data, error } = await supabase.functions.invoke('process-video', {
+      body: { path },
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (error) {
+      showUploadStatus(`Échec du lancement du traitement : ${error.message}`, '#fca5a5');
+      return;
+    }
+
+    showUploadStatus('Analyse en cours par l\'IA (2-5 minutes)...', '#9ca3af');
+    pollForClips(data.projectId, accessToken);
+  }
+
+  function pollForClips(projectId, accessToken) {
+    const interval = setInterval(async () => {
+      const { data, error } = await supabase.functions.invoke('clip-status', {
+        body: { projectId },
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      if (error) {
+        clearInterval(interval);
+        showUploadStatus(`Erreur pendant le traitement : ${error.message}`, '#fca5a5');
+        return;
+      }
+
+      if (data.status === 'done') {
+        clearInterval(interval);
+        showUploadStatus(`${data.clips.length} clip(s) généré(s) !`, '#86efac');
+        renderClips(data.clips);
+      }
+    }, 20000);
+  }
+
+  function renderClips(clips) {
+    const resultsBox = document.getElementById('clips-results');
+    const list = document.getElementById('clips-list');
+    resultsBox.style.display = 'block';
+    list.innerHTML = clips.map(c => `
+      <a href="${c.videoUrl}" target="_blank" style="display:flex;justify-content:space-between;align-items:center;background:#17171d;border:1px solid #2a2a35;border-radius:12px;padding:12px 16px;text-decoration:none;color:#fff;">
+        <span style="font-size:13px;">${c.title ?? 'Clip généré'}</span>
+        <span style="background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;">${c.viralScore ?? '?'} · score viral</span>
+      </a>
+    `).join('');
+  }
 
   const authArea = document.getElementById('auth-area');
 
