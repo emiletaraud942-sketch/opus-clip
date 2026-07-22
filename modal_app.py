@@ -260,27 +260,42 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
 
 
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")])
-@modal.fastapi_endpoint(method="POST")
-def process(payload: dict, request: Request):
+@modal.asgi_app()
+def process():
     """Endpoint HTTP appelé par le site après un upload réussi, ou pour un lien YouTube.
     Header requis : Authorization: Bearer <token utilisateur Supabase>
     Body attendu : {"path": "user_id/xxx.mp4"} pour un fichier importé,
     ou {"youtubeUrl": "https://youtube.com/..."} pour un lien."""
-    auth_header = request.headers.get("authorization", "")
-    token = auth_header.replace("Bearer ", "")
-    user_id = verify_user_token(token)
-    if not user_id:
-        return JSONResponse({"error": "Non authentifié"}, status_code=401)
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
 
-    youtube_url = payload.get("youtubeUrl")
-    if youtube_url:
-        source_path = f"{user_id}/youtube_{int(time.time())}"
-        process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url)
+    web_app = FastAPI()
+    web_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+    @web_app.post("/")
+    async def handle(payload: dict, request: Request):
+        auth_header = request.headers.get("authorization", "")
+        token = auth_header.replace("Bearer ", "")
+        user_id = verify_user_token(token)
+        if not user_id:
+            return JSONResponse({"error": "Non authentifié"}, status_code=401)
+
+        youtube_url = payload.get("youtubeUrl")
+        if youtube_url:
+            source_path = f"{user_id}/youtube_{int(time.time())}"
+            process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url)
+            return {"status": "processing_started", "sourcePath": source_path}
+
+        source_path = payload["path"]
+        if not source_path.startswith(f"{user_id}/"):
+            return JSONResponse({"error": "Chemin invalide"}, status_code=403)
+
+        process_video.spawn(user_id=user_id, source_path=source_path)
         return {"status": "processing_started", "sourcePath": source_path}
 
-    source_path = payload["path"]
-    if not source_path.startswith(f"{user_id}/"):
-        return JSONResponse({"error": "Chemin invalide"}, status_code=403)
-
-    process_video.spawn(user_id=user_id, source_path=source_path)
-    return {"status": "processing_started", "sourcePath": source_path}
+    return web_app
