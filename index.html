@@ -141,7 +141,13 @@
     }
 
     showUploadStatus('Vidéo importée, lancement du traitement IA...', '#9ca3af');
-    await startProcessing({ path }, session.access_token);
+    const freshToken = await getFreshAccessToken();
+    if (!freshToken) {
+      showUploadStatus('Ta session a expiré. Reconnecte-toi puis réessaie.', '#fca5a5');
+      setBusy(false);
+      return;
+    }
+    await startProcessing({ path }, freshToken);
   });
 
   youtubeSubmitBtn.addEventListener('click', async () => {
@@ -157,8 +163,23 @@
 
     setBusy(true);
     showUploadStatus('Lancement du traitement IA...', '#9ca3af');
-    await startProcessing({ youtubeUrl: url }, session.access_token);
+    const freshToken = await getFreshAccessToken();
+    if (!freshToken) {
+      showUploadStatus('Ta session a expiré. Reconnecte-toi puis réessaie.', '#fca5a5');
+      setBusy(false);
+      return;
+    }
+    await startProcessing({ youtubeUrl: url }, freshToken);
   });
+
+  // Force un rafraîchissement du token juste avant l'appel à Modal, pour
+  // éviter d'envoyer un token périmé si le rafraîchissement automatique
+  // de Supabase n'a pas encore eu lieu.
+  async function getFreshAccessToken() {
+    const { data, error } = await supabase.auth.refreshSession();
+    if (error || !data.session) return null;
+    return data.session.access_token;
+  }
 
   async function startProcessing(body, accessToken) {
     const res = await fetch(MODAL_PROCESS_URL, {
