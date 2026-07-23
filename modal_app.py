@@ -63,14 +63,26 @@ def verify_user_token(token: str) -> str | None:
     """Vérifie un token JWT Supabase auprès de l'API Auth et renvoie l'user_id."""
     import requests
 
-    res = requests.get(
-        f"{os.environ['SUPABASE_URL']}/auth/v1/user",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "apikey": os.environ["SUPABASE_ANON_KEY"],
-        },
-        timeout=10,
-    )
+    token = token.strip()
+    anon_key = os.environ["SUPABASE_ANON_KEY"].strip()
+    supabase_url = os.environ["SUPABASE_URL"].strip()
+
+    try:
+        res = requests.get(
+            f"{supabase_url}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "apikey": anon_key,
+            },
+            timeout=10,
+        )
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(
+            "Un des secrets Modal (SUPABASE_URL, SUPABASE_ANON_KEY) contient un "
+            "caractère invalide ou du texte collé en trop — recrée le secret "
+            "avec des valeurs propres."
+        ) from exc
+
     if res.status_code != 200:
         return None
     return res.json().get("id")
