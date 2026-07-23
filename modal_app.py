@@ -3,15 +3,17 @@ Pipeline de traitement vidéo Sortclip : AssemblyAI + LLM + FFmpeg.
 
 Étapes pour une vidéo importée :
   1. Téléchargement depuis Supabase Storage (bucket "videos").
-  2. Transcription avec horodatage mot par mot via l'API AssemblyAI.
+  2. Transcription avec horodatage mot par mot via l'API AssemblyAI, avec
+     détection des mots-clés à mettre en emphase (Auto Highlights).
   3. Un LLM (Claude) lit la transcription complète et choisit les meilleurs
      segments à clipper : début, fin, titre accrocheur, score de viralité
      (0-100) et justification. C'est un jugement de LLM sur du texte, pas
      un modèle entraîné sur des données réelles de performance sociale —
      à considérer comme une bonne heuristique éditoriale, pas une vérité
      statistique.
-  4. Chaque segment choisi est découpé, recadré en 9:16 et sous-titré
-     avec FFmpeg.
+  4. Chaque segment choisi est découpé (les silences trop longs sont
+     retirés du montage), recadré en 9:16 et sous-titré avec FFmpeg — les
+     mots-clés détectés à l'étape 2 apparaissent en couleur.
   5. Les clips sont envoyés dans le bucket Supabase "clips" et
      enregistrés dans la table "clips".
 
@@ -151,12 +153,16 @@ def count_user_videos(supabase, user_id: str) -> int:
 
 def transcribe(video_path: str):
     """Transcrit l'audio avec AssemblyAI. Retourne les mots horodatés
-    (en secondes) et le texte complet."""
+    (en secondes), le texte complet, et l'ensemble des mots-clés à mettre
+    en emphase dans les sous-titres (fonctionnalité "Auto Highlights")."""
     import assemblyai as aai
 
     aai.settings.api_key = os.environ["ASSEMBLYAI_API_KEY"]
     transcriber = aai.Transcriber()
-    transcript = transcriber.transcribe(video_path, config=aai.TranscriptionConfig(language_code="fr"))
+    transcript = transcriber.transcribe(
+        video_path,
+        config=aai.TranscriptionConfig(language_code="fr", auto_highlights=True),
+    )
 
     if transcript.status == aai.TranscriptStatus.error:
         raise RuntimeError(f"Échec transcription AssemblyAI : {transcript.error}")
@@ -165,7 +171,14 @@ def transcribe(video_path: str):
         {"word": w.text, "start": w.start / 1000, "end": w.end / 1000}
         for w in transcript.words
     ]
-    return words, transcript.text
+
+    highlight_words = set()
+    if transcript.auto_highlights_result:
+        for result in transcript.auto_highlights_result.results:
+            for token in result.text.split():
+                highlight_words.add(token.strip(".,!?;:\"'").lower())
+
+    return words, transcript.text, highlight_words
 
 
 def select_clips_with_llm(words: list, full_text: str) -> list:
@@ -213,55 +226,134 @@ def words_in_range(words: list, start: float, end: float) -> list:
     return [w for w in words if w["start"] >= start and w["end"] <= end]
 
 
-def write_srt(words: list, clip_start: float, path: str):
-    def fmt(t):
-        h, rem = divmod(max(0, t), 3600)
-        m, s = divmod(rem, 60)
-        return f"{int(h):02d}:{int(m):02d}:{s:06.3f}".replace(".", ",")
+# Silences (entre deux mots) plus longs que ce seuil sont coupés au montage.
+MIN_SILENCE_GAP = 0.6
+# Petite marge conservée autour de chaque coupe pour ne pas couper un mot trop court.
+SILENCE_CUT_BUFFER = 0.08
 
-    lines = []
-    idx = 1
+
+def build_keep_segments(clip_words: list, clip_start: float, clip_end: float) -> list:
+    """Calcule les portions de la vidéo à garder (en excluant les silences
+    trop longs) pour un clip donné. Retourne une liste de (start, end)."""
+    if not clip_words:
+        return [(clip_start, clip_end)]
+
+    segments = []
+    cursor = clip_start
+    prev_end = clip_start
+
+    for w in clip_words:
+        gap = w["start"] - prev_end
+        if gap > MIN_SILENCE_GAP:
+            segment_end = prev_end + SILENCE_CUT_BUFFER
+            if segment_end > cursor:
+                segments.append((cursor, segment_end))
+            cursor = max(segment_end, w["start"] - SILENCE_CUT_BUFFER)
+        prev_end = max(prev_end, w["end"])
+
+    if clip_end > cursor:
+        segments.append((cursor, clip_end))
+
+    return [(s, e) for s, e in segments if e - s > 0.05] or [(clip_start, clip_end)]
+
+
+def remap_time(t: float, segments: list) -> float:
+    """Convertit un horodatage de la vidéo d'origine vers sa position dans
+    le montage compressé (silences retirés)."""
+    compressed = 0.0
+    for s, e in segments:
+        if t <= e:
+            return compressed + max(0.0, t - s)
+        compressed += e - s
+    return compressed
+
+
+def fmt_ass_time(t: float) -> str:
+    t = max(0.0, t)
+    h, rem = divmod(t, 3600)
+    m, s = divmod(rem, 60)
+    return f"{int(h)}:{int(m):02d}:{s:05.2f}"
+
+
+ASS_HEADER = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,44,&H00FFFFFF,&H00000000,&H00000000,0,3,3,0,2,20,20,80,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+# Couleur d'emphase des mots-clés (format ASS &HAABBGGRR&) : jaune vif.
+HIGHLIGHT_COLOR = "&H0000FFFF&"
+DEFAULT_COLOR = "&H00FFFFFF&"
+
+
+def write_subtitles(words: list, highlight_words: set, segments: list, path: str):
+    """Génère un fichier de sous-titres .ass, avec les horodatages remappés
+    sur le montage compressé (silences retirés) et les mots-clés en couleur."""
+    lines = [ASS_HEADER]
     chunk = []
 
     def flush():
-        nonlocal idx, chunk
         if not chunk:
             return
-        start = chunk[0]["start"] - clip_start
-        end = chunk[-1]["end"] - clip_start
-        text = " ".join(w["word"] for w in chunk)
-        lines.append(f"{idx}\n{fmt(start)} --> {fmt(end)}\n{text}\n")
-        idx += 1
-        chunk = []
+        start = remap_time(chunk[0]["start"], segments)
+        end = remap_time(chunk[-1]["end"], segments)
+        parts = []
+        for w in chunk:
+            clean = w["word"].strip(".,!?;:\"'").lower()
+            if clean in highlight_words:
+                parts.append(f"{{\\c{HIGHLIGHT_COLOR}}}{w['word']}{{\\c{DEFAULT_COLOR}}}")
+            else:
+                parts.append(w["word"])
+        text = " ".join(parts)
+        lines.append(f"Dialogue: 0,{fmt_ass_time(start)},{fmt_ass_time(end)},Default,,0,0,0,,{text}")
 
     for w in words:
         chunk.append(w)
         if len(chunk) >= 6:
             flush()
+            chunk = []
     flush()
 
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
-def render_clip(source_path: str, clip: dict, words: list, out_path: str):
+def render_clip(source_path: str, clip: dict, words: list, highlight_words: set, out_path: str):
     with tempfile.TemporaryDirectory() as tmp:
-        srt_path = os.path.join(tmp, "subs.srt")
         clip_words = words_in_range(words, clip["start"], clip["end"])
-        write_srt(clip_words, clip["start"], srt_path)
+        segments = build_keep_segments(clip_words, clip["start"], clip["end"])
 
-        duration = clip["end"] - clip["start"]
-        vf = (
-            "crop=ih*9/16:ih,scale=1080:1920,"
-            f"subtitles={srt_path}:force_style='Fontsize=20,PrimaryColour=&HFFFFFF&,"
-            "OutlineColour=&H000000&,BorderStyle=3,Outline=2,Alignment=2,MarginV=80'"
+        subs_path = os.path.join(tmp, "subs.ass")
+        write_subtitles(clip_words, highlight_words, segments, subs_path)
+
+        # Un morceau de filtre par segment gardé (coupe les silences), puis
+        # on les recolle (concat) avant le recadrage et les sous-titres.
+        filter_parts = []
+        concat_inputs = ""
+        for i, (s, e) in enumerate(segments):
+            filter_parts.append(
+                f"[0:v]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS[v{i}];"
+                f"[0:a]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{i}]"
+            )
+            concat_inputs += f"[v{i}][a{i}]"
+
+        filter_complex = ";".join(filter_parts)
+        filter_complex += f";{concat_inputs}concat=n={len(segments)}:v=1:a=1[catv][cata]"
+        filter_complex += (
+            f";[catv]crop=ih*9/16:ih,scale=1080:1920,subtitles={subs_path}[outv]"
         )
 
         subprocess.run([
             "ffmpeg", "-y",
-            "-ss", str(clip["start"]),
             "-i", source_path,
-            "-t", str(duration),
-            "-vf", vf,
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "[cata]",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-c:a", "aac",
             out_path,
@@ -292,13 +384,13 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     f"La limite actuelle est de {MAX_VIDEO_DURATION_SECONDS // 60} minutes."
                 )
 
-            words, full_text = transcribe(local_video)
+            words, full_text, highlight_words = transcribe(local_video)
             clips = select_clips_with_llm(words, full_text)
 
             rows = []
             for i, clip in enumerate(clips):
                 out_path = os.path.join(tmp, f"clip_{i}.mp4")
-                render_clip(local_video, clip, words, out_path)
+                render_clip(local_video, clip, words, highlight_words, out_path)
 
                 storage_path = f"{user_id}/{Path(source_path).stem}_clip{i}.mp4"
                 with open(out_path, "rb") as f:
