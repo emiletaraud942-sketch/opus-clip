@@ -110,6 +110,8 @@ def verify_user_token(token: str) -> str | None:
         headers={
             "Authorization": f"Bearer {token}",
             "apikey": anon_key,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; SortclipBackend/1.0)",
         },
         timeout=10,
     )
