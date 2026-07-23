@@ -136,7 +136,12 @@
     });
     if (error) showError(error.message);
   });
+
+  // Si déjà connecté, inutile de rester sur cette page.
+  const { data: { session: existingSession } } = await supabase.auth.getSession();
+  if (existingSession) {
+    window.location.href = 'index.html';
+  }
 </script>
-<script type="module" src="auth-redirect.js"></script>
 </body>
 </html>
