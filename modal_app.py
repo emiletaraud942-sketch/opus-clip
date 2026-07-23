@@ -571,34 +571,43 @@ def process():
 
     @web_app.post("/")
     async def handle(payload: dict, request: Request):
-        auth_header = request.headers.get("authorization", "")
-        token = auth_header.replace("Bearer ", "")
-        user_id = verify_user_token(token)
-        if not user_id:
-            return JSONResponse({"error": "Non authentifié"}, status_code=401)
+        # Tout est enveloppé dans ce try/except : si une exception remonte
+        # sans passer par ici, FastAPI renvoie une erreur 500 SANS les
+        # en-têtes CORS (ils ne sont ajoutés qu'aux réponses "normales").
+        # Le navigateur voit alors "Failed to fetch" / net::ERR_FAILED au
+        # lieu du vrai message d'erreur — d'où ce filet de sécurité.
+        try:
+            auth_header = request.headers.get("authorization", "")
+            token = auth_header.replace("Bearer ", "")
+            user_id = verify_user_token(token)
+            if not user_id:
+                return JSONResponse({"error": "Non authentifié"}, status_code=401)
 
-        supabase = get_supabase_client()
-        videos_used = count_user_videos(supabase, user_id)
-        if videos_used >= FREE_TIER_VIDEO_LIMIT:
-            return JSONResponse({
-                "error": f"Tu as atteint la limite de {FREE_TIER_VIDEO_LIMIT} vidéos gratuites. "
-                         "Contacte-nous pour passer à un plan supérieur."
-            }, status_code=403)
+            supabase = get_supabase_client()
+            videos_used = count_user_videos(supabase, user_id)
+            if videos_used >= FREE_TIER_VIDEO_LIMIT:
+                return JSONResponse({
+                    "error": f"Tu as atteint la limite de {FREE_TIER_VIDEO_LIMIT} vidéos gratuites. "
+                             "Contacte-nous pour passer à un plan supérieur."
+                }, status_code=403)
 
-        youtube_url = payload.get("youtubeUrl")
-        if youtube_url:
-            # La validation de la durée est faite dans process_video (en
-            # arrière-plan) : yt-dlp est trop lent pour bloquer la réponse
-            # HTTP ici, et le site attendrait sans retour visuel.
-            source_path = f"{user_id}/youtube_{int(time.time())}"
-            process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url)
+            youtube_url = payload.get("youtubeUrl")
+            if youtube_url:
+                # La validation de la durée est faite dans process_video (en
+                # arrière-plan) : yt-dlp est trop lent pour bloquer la réponse
+                # HTTP ici, et le site attendrait sans retour visuel.
+                source_path = f"{user_id}/youtube_{int(time.time())}"
+                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url)
+                return {"status": "processing_started", "sourcePath": source_path}
+
+            source_path = payload["path"]
+            if not source_path.startswith(f"{user_id}/"):
+                return JSONResponse({"error": "Chemin invalide"}, status_code=403)
+
+            process_video.spawn(user_id=user_id, source_path=source_path)
             return {"status": "processing_started", "sourcePath": source_path}
-
-        source_path = payload["path"]
-        if not source_path.startswith(f"{user_id}/"):
-            return JSONResponse({"error": "Chemin invalide"}, status_code=403)
-
-        process_video.spawn(user_id=user_id, source_path=source_path)
-        return {"status": "processing_started", "sourcePath": source_path}
+        except Exception as exc:
+            print(f"[handle] Erreur non gérée : {exc}")
+            return JSONResponse({"error": f"Erreur serveur : {exc}"}, status_code=500)
 
     return web_app
