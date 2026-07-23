@@ -47,8 +47,10 @@ image = (
         "supabase==2.7.4",
         "fastapi[standard]",
         "requests==2.32.3",
-        "yt-dlp==2024.10.7",
     )
+    # yt-dlp installé depuis GitHub (master) : YouTube change ses protections
+    # anti-robot en permanence, une version PyPI figée casse vite.
+    .pip_install("yt-dlp @ git+https://github.com/yt-dlp/yt-dlp.git")
 )
 
 SOURCE_BUCKET = "videos"
@@ -141,10 +143,55 @@ def verify_user_token(token: str) -> str | None:
     return res.json().get("id")
 
 
+# User-Agent d'un vrai navigateur : sans ça, YouTube identifie plus vite
+# les requêtes comme automatisées et renvoie "Sign in to confirm you're not
+# a bot".
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
+
+
+def _base_ydl_opts() -> dict:
+    """Options communes à l'inspection et au téléchargement, réglées pour
+    limiter la détection anti-robot de YouTube.
+
+    Note honnête : ces réglages RÉDUISENT les blocages mais ne les
+    éliminent pas. YouTube bloque de plus en plus les IP de datacenters
+    (comme celles de Modal). Le contournement le plus fiable reste de
+    fournir des cookies d'un compte connecté via le secret Modal
+    YOUTUBE_COOKIES (voir download_youtube)."""
+    return {
+        "quiet": True,
+        "no_warnings": True,
+        "user_agent": _BROWSER_UA,
+        "retries": 5,
+        "fragment_retries": 5,
+        "extractor_retries": 3,
+        "socket_timeout": 30,
+        # On tente plusieurs "clients" internes de YouTube ; certains
+        # passent quand le client web par défaut est bloqué.
+        "extractor_args": {"youtube": {"player_client": ["android", "web", "ios"]}},
+    }
+
+
+def _apply_cookies(opts: dict) -> dict:
+    """Ajoute des cookies YouTube si le secret YOUTUBE_COOKIES est fourni
+    (format Netscape cookies.txt). C'est ce qui fait vraiment la différence
+    face à la détection anti-robot sur IP de datacenter."""
+    cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if cookies:
+        cookie_file = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
+        Path(cookie_file).write_text(cookies, encoding="utf-8")
+        opts["cookiefile"] = cookie_file
+    return opts
+
+
 def get_youtube_duration(url: str) -> float:
     import yt_dlp
 
-    with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+    opts = _apply_cookies(_base_ydl_opts())
+    with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return info.get("duration") or 0
 
@@ -152,12 +199,12 @@ def get_youtube_duration(url: str) -> float:
 def download_youtube(url: str, out_path: str):
     import yt_dlp
 
-    opts = {
+    opts = _apply_cookies(_base_ydl_opts())
+    opts.update({
         "format": "mp4/bestvideo+bestaudio",
         "outtmpl": out_path,
         "merge_output_format": "mp4",
-        "quiet": True,
-    }
+    })
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 
