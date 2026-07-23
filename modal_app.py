@@ -53,6 +53,21 @@ SOURCE_BUCKET = "videos"
 CLIPS_BUCKET = "clips"
 MAX_CLIPS_PER_VIDEO = 6
 
+# Limite du plan gratuit tant qu'aucun système de facturation n'est branché
+# (voir tarifs.html : "3 vidéos offertes"). Ce nombre est comptabilisé à vie,
+# tous statuts confondus (chaque tentative coûte de l'argent en API tierces).
+FREE_TIER_VIDEO_LIMIT = 3
+
+# Durée maximale acceptée pour une vidéo (upload ou lien YouTube), pour éviter
+# qu'un compte gratuit ne lance un traitement démesurément coûteux.
+MAX_VIDEO_DURATION_SECONDS = 60 * 60  # 60 minutes
+
+ALLOWED_ORIGINS = [
+    "https://opus-clip-alpha.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:5500",
+]
+
 
 def get_supabase_client():
     from supabase import create_client
@@ -99,6 +114,14 @@ def verify_user_token(token: str) -> str | None:
     return res.json().get("id")
 
 
+def get_youtube_duration(url: str) -> float:
+    import yt_dlp
+
+    with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+        info = ydl.extract_info(url, download=False)
+    return info.get("duration") or 0
+
+
 def download_youtube(url: str, out_path: str):
     import yt_dlp
 
@@ -110,6 +133,20 @@ def download_youtube(url: str, out_path: str):
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
+
+
+def get_video_duration(video_path: str) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        capture_output=True, text=True, check=True,
+    )
+    return float(result.stdout.strip())
+
+
+def count_user_videos(supabase, user_id: str) -> int:
+    res = supabase.table("clip_jobs").select("id", count="exact").eq("user_id", user_id).execute()
+    return res.count or 0
 
 
 def transcribe(video_path: str):
@@ -248,6 +285,13 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                 video_bytes = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
                 Path(local_video).write_bytes(video_bytes)
 
+            duration = get_video_duration(local_video)
+            if duration > MAX_VIDEO_DURATION_SECONDS:
+                raise RuntimeError(
+                    f"Vidéo trop longue ({int(duration / 60)} min). "
+                    f"La limite actuelle est de {MAX_VIDEO_DURATION_SECONDS // 60} minutes."
+                )
+
             words, full_text = transcribe(local_video)
             clips = select_clips_with_llm(words, full_text)
 
@@ -295,7 +339,7 @@ def process():
     web_app = FastAPI()
     web_app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=ALLOWED_ORIGINS,
         allow_methods=["POST", "OPTIONS"],
         allow_headers=["*"],
     )
@@ -308,8 +352,27 @@ def process():
         if not user_id:
             return JSONResponse({"error": "Non authentifié"}, status_code=401)
 
+        supabase = get_supabase_client()
+        videos_used = count_user_videos(supabase, user_id)
+        if videos_used >= FREE_TIER_VIDEO_LIMIT:
+            return JSONResponse({
+                "error": f"Tu as atteint la limite de {FREE_TIER_VIDEO_LIMIT} vidéos gratuites. "
+                         "Contacte-nous pour passer à un plan supérieur."
+            }, status_code=403)
+
         youtube_url = payload.get("youtubeUrl")
         if youtube_url:
+            try:
+                duration = get_youtube_duration(youtube_url)
+            except Exception:
+                return JSONResponse({"error": "Impossible de lire ce lien YouTube."}, status_code=400)
+
+            if duration > MAX_VIDEO_DURATION_SECONDS:
+                return JSONResponse({
+                    "error": f"Cette vidéo est trop longue ({int(duration / 60)} min). "
+                             f"La limite actuelle est de {MAX_VIDEO_DURATION_SECONDS // 60} minutes."
+                }, status_code=400)
+
             source_path = f"{user_id}/youtube_{int(time.time())}"
             process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url)
             return {"status": "processing_started", "sourcePath": source_path}

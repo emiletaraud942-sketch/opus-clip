@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nouveau mot de passe — Sortclip</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="nav.css">
+<style>
+  body{margin:0;background:#0f0f14;}
+  a{color:inherit;text-decoration:none;}
+  input:focus{outline:none;border-color:#f43f8e !important;}
+</style>
+</head>
+<body>
+<section style="position:relative;width:100%;min-height:100vh;background:#0f0f14;font-family:'Inter',sans-serif;color:#fff;padding:32px;box-sizing:border-box;">
+  <div style="max-width:1240px;margin:0 auto;">
+    <div id="nav-root"></div>
+    <script type="module">
+      import { renderNav } from './nav.js';
+      renderNav({});
+    </script>
+  </div>
+
+  <div style="max-width:420px;margin:20px auto 0;">
+    <div style="text-align:center;margin-bottom:32px;">
+      <h1 style="font-family:'Space Grotesk',sans-serif;font-size:30px;font-weight:700;margin:0 0 10px;">Nouveau mot de passe</h1>
+      <p style="font-size:14px;color:#9ca3af;margin:0;">Choisis un nouveau mot de passe pour ton compte</p>
+    </div>
+
+    <div id="message-box" style="display:none;font-size:13px;padding:12px 14px;border-radius:10px;margin-bottom:16px;"></div>
+
+    <form id="reset-form" style="background:#17171d;border:1px solid #2a2a35;border-radius:20px;padding:28px;box-sizing:border-box;">
+      <label style="display:block;font-size:13px;color:#d1d5db;margin-bottom:6px;">Nouveau mot de passe</label>
+      <input type="password" id="password" required minlength="8" placeholder="8 caractères minimum"
+        style="width:100%;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:14px;padding:12px 14px;border-radius:10px;box-sizing:border-box;margin-bottom:22px;" />
+
+      <button type="submit" id="reset-submit"
+        style="width:100%;background:#f43f8e;color:#fff;font-weight:700;font-size:14px;padding:13px;border:none;border-radius:9999px;cursor:pointer;">
+        Enregistrer le nouveau mot de passe
+      </button>
+    </form>
+  </div>
+</section>
+
+<script type="module">
+  import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+  import { SUPABASE_URL, SUPABASE_ANON_KEY } from './supabase-config.js';
+
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const messageBox = document.getElementById('message-box');
+
+  function showMessage(text, kind) {
+    messageBox.textContent = text;
+    messageBox.style.background = kind === 'error' ? 'rgba(244,63,94,.1)' : 'rgba(34,197,94,.1)';
+    messageBox.style.border = kind === 'error' ? '1px solid rgba(244,63,94,.4)' : '1px solid rgba(34,197,94,.4)';
+    messageBox.style.color = kind === 'error' ? '#fca5a5' : '#86efac';
+    messageBox.style.display = 'block';
+  }
+
+  document.getElementById('reset-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const submitBtn = document.getElementById('reset-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Enregistrement...';
+
+    const password = document.getElementById('password').value;
+    const { error } = await supabase.auth.updateUser({ password });
+
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Enregistrer le nouveau mot de passe';
+
+    if (error) {
+      showMessage(error.message, 'error');
+      return;
+    }
+
+    showMessage('Mot de passe mis à jour ! Redirection vers la connexion...', 'success');
+    setTimeout(() => { window.location.href = 'login.html'; }, 2000);
+  });
+</script>
+</body>
+</html>

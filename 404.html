@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page introuvable — Sortclip</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="nav.css">
+<style>
+  body{margin:0;background:#0f0f14;}
+  a{color:inherit;text-decoration:none;}
+</style>
+</head>
+<body>
+<section style="position:relative;width:100%;min-height:100vh;background:#0f0f14;font-family:'Inter',sans-serif;color:#fff;padding:32px;box-sizing:border-box;display:flex;flex-direction:column;">
+  <div style="max-width:1240px;margin:0 auto;width:100%;">
+    <div id="nav-root"></div>
+    <script type="module">
+      import { renderNav } from './nav.js';
+      renderNav({});
+    </script>
+  </div>
+
+  <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:16px;">
+    <div style="font-family:'Space Grotesk',sans-serif;font-size:64px;font-weight:700;color:#f43f8e;">404</div>
+    <h1 style="font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:700;margin:0;">Cette page n'existe pas</h1>
+    <p style="color:#9ca3af;font-size:15px;margin:0 0 12px;">Le lien est peut-être incorrect ou la page a été déplacée.</p>
+    <a href="index.html" style="background:#f43f8e;color:#fff;font-weight:700;font-size:14px;padding:12px 24px;border-radius:9999px;">Retour à l'accueil</a>
+  </div>
+</section>
+</body>
+</html>
