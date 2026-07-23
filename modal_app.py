@@ -423,6 +423,24 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             local_video = os.path.join(tmp, "source.mp4")
 
             if youtube_url:
+                # Vérifie la durée AVANT de télécharger, pour ne pas rapatrier
+                # une vidéo de plusieurs heures inutilement. Fait ici (en
+                # arrière-plan) et non dans l'endpoint HTTP, car yt-dlp peut
+                # mettre de longues secondes à répondre.
+                try:
+                    yt_duration = get_youtube_duration(youtube_url)
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Impossible de lire ce lien YouTube (vidéo privée, "
+                        "supprimée, ou accès bloqué)."
+                    ) from exc
+
+                if yt_duration > MAX_VIDEO_DURATION_SECONDS:
+                    raise RuntimeError(
+                        f"Vidéo trop longue ({int(yt_duration / 60)} min). "
+                        f"La limite actuelle est de {MAX_VIDEO_DURATION_SECONDS // 60} minutes."
+                    )
+
                 download_youtube(youtube_url, local_video)
             else:
                 video_bytes = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
@@ -522,17 +540,9 @@ def process():
 
         youtube_url = payload.get("youtubeUrl")
         if youtube_url:
-            try:
-                duration = get_youtube_duration(youtube_url)
-            except Exception:
-                return JSONResponse({"error": "Impossible de lire ce lien YouTube."}, status_code=400)
-
-            if duration > MAX_VIDEO_DURATION_SECONDS:
-                return JSONResponse({
-                    "error": f"Cette vidéo est trop longue ({int(duration / 60)} min). "
-                             f"La limite actuelle est de {MAX_VIDEO_DURATION_SECONDS // 60} minutes."
-                }, status_code=400)
-
+            # La validation de la durée est faite dans process_video (en
+            # arrière-plan) : yt-dlp est trop lent pour bloquer la réponse
+            # HTTP ici, et le site attendrait sans retour visuel.
             source_path = f"{user_id}/youtube_{int(time.time())}"
             process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url)
             return {"status": "processing_started", "sourcePath": source_path}

@@ -182,14 +182,33 @@
   }
 
   async function startProcessing(body, accessToken) {
-    const res = await fetch(MODAL_PROCESS_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify(body),
-    });
+    showUploadStatus('Lancement du traitement IA (le démarrage peut prendre jusqu\'à une minute)...', '#9ca3af');
+
+    let res;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 90000);
+      res = await fetch(MODAL_PROCESS_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+    } catch (err) {
+      console.error('Appel au serveur de traitement échoué:', err);
+      showUploadStatus(
+        err.name === 'AbortError'
+          ? "Le serveur de traitement n'a pas répondu à temps. Réessaie dans un instant."
+          : "Impossible de contacter le serveur de traitement. Vérifie ta connexion et réessaie.",
+        '#fca5a5'
+      );
+      setBusy(false);
+      return;
+    }
 
     const data = await res.json().catch(() => ({}));
 
