@@ -220,10 +220,27 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme :
     # Robustesse si le modèle entoure quand même le JSON de texte/markdown.
     start_idx = raw.find("[")
     end_idx = raw.rfind("]")
-    clips = json.loads(raw[start_idx:end_idx + 1])
+    if start_idx == -1 or end_idx == -1:
+        raise RuntimeError("Le modèle IA n'a pas renvoyé de sélection de clips exploitable.")
 
-    clips.sort(key=lambda c: c["score"], reverse=True)
-    return clips[:MAX_CLIPS_PER_VIDEO]
+    try:
+        clips = json.loads(raw[start_idx:end_idx + 1])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Réponse IA illisible pour sélectionner les clips : {exc}") from exc
+
+    valid_clips = []
+    for c in clips:
+        if not all(k in c for k in ("start", "end", "title", "score")):
+            continue
+        if c["end"] <= c["start"]:
+            continue
+        valid_clips.append(c)
+
+    if not valid_clips:
+        raise RuntimeError("Aucun moment exploitable n'a été trouvé dans cette vidéo.")
+
+    valid_clips.sort(key=lambda c: c["score"], reverse=True)
+    return valid_clips[:MAX_CLIPS_PER_VIDEO]
 
 
 def words_in_range(words: list, start: float, end: float) -> list:
@@ -234,6 +251,10 @@ def words_in_range(words: list, start: float, end: float) -> list:
 MIN_SILENCE_GAP = 0.6
 # Petite marge conservée autour de chaque coupe pour ne pas couper un mot trop court.
 SILENCE_CUT_BUFFER = 0.08
+# Au-delà de ce nombre de coupures, le filtre FFmpeg devient trop complexe et
+# risque d'échouer : on renonce à retirer les silences pour ce clip plutôt
+# que de faire planter tout le montage.
+MAX_SEGMENTS_FOR_SILENCE_REMOVAL = 40
 
 
 def build_keep_segments(clip_words: list, clip_start: float, clip_end: float) -> list:
@@ -258,7 +279,12 @@ def build_keep_segments(clip_words: list, clip_start: float, clip_end: float) ->
     if clip_end > cursor:
         segments.append((cursor, clip_end))
 
-    return [(s, e) for s, e in segments if e - s > 0.05] or [(clip_start, clip_end)]
+    segments = [(s, e) for s, e in segments if e - s > 0.05] or [(clip_start, clip_end)]
+
+    if len(segments) > MAX_SEGMENTS_FOR_SILENCE_REMOVAL:
+        return [(clip_start, clip_end)]
+
+    return segments
 
 
 def remap_time(t: float, segments: list) -> float:
@@ -389,32 +415,43 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                 )
 
             words, full_text, highlight_words = transcribe(local_video)
+            if not words:
+                raise RuntimeError("Aucune parole détectée dans cette vidéo — impossible de générer des clips.")
+
             clips = select_clips_with_llm(words, full_text)
 
             rows = []
             for i, clip in enumerate(clips):
-                out_path = os.path.join(tmp, f"clip_{i}.mp4")
-                render_clip(local_video, clip, words, highlight_words, out_path)
+                try:
+                    out_path = os.path.join(tmp, f"clip_{i}.mp4")
+                    render_clip(local_video, clip, words, highlight_words, out_path)
 
-                storage_path = f"{user_id}/{Path(source_path).stem}_clip{i}.mp4"
-                with open(out_path, "rb") as f:
-                    supabase.storage.from_(CLIPS_BUCKET).upload(
-                        storage_path, f, {"content-type": "video/mp4", "upsert": "true"}
-                    )
+                    storage_path = f"{user_id}/{Path(source_path).stem}_clip{i}.mp4"
+                    with open(out_path, "rb") as f:
+                        supabase.storage.from_(CLIPS_BUCKET).upload(
+                            storage_path, f, {"content-type": "video/mp4", "upsert": "true"}
+                        )
 
-                rows.append({
-                    "user_id": user_id,
-                    "source_path": source_path,
-                    "storage_path": storage_path,
-                    "title": clip["title"],
-                    "score": clip["score"],
-                    "reason": clip.get("reason", ""),
-                    "start_time": clip["start"],
-                    "end_time": clip["end"],
-                })
+                    rows.append({
+                        "user_id": user_id,
+                        "source_path": source_path,
+                        "storage_path": storage_path,
+                        "title": clip["title"],
+                        "score": clip["score"],
+                        "reason": clip.get("reason", ""),
+                        "start_time": clip["start"],
+                        "end_time": clip["end"],
+                    })
+                except Exception as clip_exc:
+                    # Un clip qui échoue au montage ne doit pas faire échouer
+                    # toute la vidéo : on le saute et on continue les autres.
+                    print(f"[process_video] Échec du montage du clip {i}: {clip_exc}")
+                    continue
 
-            if rows:
-                supabase.table("clips").insert(rows).execute()
+            if not rows:
+                raise RuntimeError("Aucun clip n'a pu être monté avec succès pour cette vidéo.")
+
+            supabase.table("clips").insert(rows).execute()
 
             if not youtube_url:
                 # La vidéo source a déjà été traitée : on la supprime du bucket
