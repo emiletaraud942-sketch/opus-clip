@@ -100,6 +100,7 @@ def verify_user_token(token: str) -> str | None:
     supabase_url = os.environ["SUPABASE_URL"].strip()
 
     print(f"[verify_user_token] token reçu, longueur={len(token)}, vide={token == ''}")
+    print(f"[verify_user_token] SUPABASE_ANON_KEY longueur={len(anon_key)} (attendu ~208), SUPABASE_URL={supabase_url!r}")
 
     _check_header_safe("token (envoyé par le site)", token)
     _check_header_safe("SUPABASE_ANON_KEY", anon_key)
