@@ -99,6 +99,8 @@ def verify_user_token(token: str) -> str | None:
     anon_key = os.environ["SUPABASE_ANON_KEY"].strip()
     supabase_url = os.environ["SUPABASE_URL"].strip()
 
+    print(f"[verify_user_token] token reçu, longueur={len(token)}, vide={token == ''}")
+
     _check_header_safe("token (envoyé par le site)", token)
     _check_header_safe("SUPABASE_ANON_KEY", anon_key)
 
@@ -110,6 +112,8 @@ def verify_user_token(token: str) -> str | None:
         },
         timeout=10,
     )
+
+    print(f"[verify_user_token] Supabase a répondu {res.status_code} : {res.text[:300]}")
 
     if res.status_code != 200:
         return None
