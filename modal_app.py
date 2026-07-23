@@ -40,7 +40,7 @@ app = modal.App("sortclip-pipeline")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg")
+    .apt_install("ffmpeg", "git")
     .pip_install(
         "assemblyai==0.35.1",
         "anthropic==0.34.2",
