@@ -3,14 +3,15 @@ Pipeline de traitement vidéo Sortclip : AssemblyAI + LLM + FFmpeg.
 
 Étapes pour une vidéo importée :
   1. Téléchargement depuis Supabase Storage (bucket "videos").
-  2. Transcription avec horodatage mot par mot via l'API AssemblyAI, avec
-     détection des mots-clés à mettre en emphase (Auto Highlights).
+  2. Transcription avec horodatage mot par mot via l'API AssemblyAI.
   3. Un LLM (Claude) lit la transcription complète et choisit les meilleurs
      segments à clipper : début, fin, titre accrocheur, score de viralité
-     (0-100) et justification. C'est un jugement de LLM sur du texte, pas
-     un modèle entraîné sur des données réelles de performance sociale —
-     à considérer comme une bonne heuristique éditoriale, pas une vérité
-     statistique.
+     (0-100), justification, et les mots-clés à mettre en emphase dans les
+     sous-titres (AssemblyAI Auto Highlights n'étant pas disponible en
+     français, c'est Claude qui s'en charge). C'est un jugement de LLM sur
+     du texte, pas un modèle entraîné sur des données réelles de
+     performance sociale — à considérer comme une bonne heuristique
+     éditoriale, pas une vérité statistique.
   4. Chaque segment choisi est découpé (les silences trop longs sont
      retirés du montage), recadré en 9:16 et sous-titré avec FFmpeg — les
      mots-clés détectés à l'étape 2 apparaissent en couleur.
@@ -225,15 +226,19 @@ def count_user_videos(supabase, user_id: str) -> int:
 
 def transcribe(video_path: str):
     """Transcrit l'audio avec AssemblyAI. Retourne les mots horodatés
-    (en secondes), le texte complet, et l'ensemble des mots-clés à mettre
-    en emphase dans les sous-titres (fonctionnalité "Auto Highlights")."""
+    (en secondes) et le texte complet.
+
+    Note : la fonctionnalité "Auto Highlights" d'AssemblyAI n'est pas
+    disponible en français, donc les mots-clés à mettre en emphase sont
+    déterminés par Claude (voir select_clips_with_llm) plutôt que par
+    AssemblyAI."""
     import assemblyai as aai
 
     aai.settings.api_key = os.environ["ASSEMBLYAI_API_KEY"]
     transcriber = aai.Transcriber()
     transcript = transcriber.transcribe(
         video_path,
-        config=aai.TranscriptionConfig(language_code="fr", auto_highlights=True),
+        config=aai.TranscriptionConfig(language_code="fr"),
     )
 
     if transcript.status == aai.TranscriptStatus.error:
@@ -244,17 +249,14 @@ def transcribe(video_path: str):
         for w in transcript.words
     ]
 
-    highlight_words = set()
-    if transcript.auto_highlights_result:
-        for result in transcript.auto_highlights_result.results:
-            for token in result.text.split():
-                highlight_words.add(token.strip(".,!?;:\"'").lower())
-
-    return words, transcript.text, highlight_words
+    return words, transcript.text
 
 
 def select_clips_with_llm(words: list, full_text: str) -> list:
-    """Demande à Claude de choisir les meilleurs segments à clipper."""
+    """Demande à Claude de choisir les meilleurs segments à clipper, et
+    d'indiquer pour chacun les mots-clés à mettre en emphase dans les
+    sous-titres (à la place d'AssemblyAI Auto Highlights, indisponible
+    en français)."""
     from anthropic import Anthropic
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -273,9 +275,14 @@ Choisis jusqu'à {MAX_CLIPS_PER_VIDEO} extraits qui feraient de bons clips court
 moments à forte accroche, anecdotes, punchlines, révélations, conseils actionnables.
 Chaque extrait doit durer entre 15 et 75 secondes.
 
+Pour chaque extrait, indique aussi 3 à 6 mots ou courtes expressions du texte
+(reprises exactement telles qu'elles apparaissent dans la transcription) à
+mettre en emphase visuellement dans les sous-titres : les mots les plus
+percutants/mémorables de l'extrait.
+
 Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme :
 [
-  {{"start": 12.4, "end": 45.2, "title": "titre accrocheur court", "score": 87, "reason": "pourquoi ce moment est fort"}}
+  {{"start": 12.4, "end": 45.2, "title": "titre accrocheur court", "score": 87, "reason": "pourquoi ce moment est fort", "highlights": ["mot1", "expression 2"]}}
 ]"""
 
     response = client.messages.create(
@@ -500,7 +507,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     f"La limite actuelle est de {MAX_VIDEO_DURATION_SECONDS // 60} minutes."
                 )
 
-            words, full_text, highlight_words = transcribe(local_video)
+            words, full_text = transcribe(local_video)
             if not words:
                 raise RuntimeError("Aucune parole détectée dans cette vidéo — impossible de générer des clips.")
 
@@ -509,6 +516,11 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             rows = []
             for i, clip in enumerate(clips):
                 try:
+                    highlight_words = {
+                        token.strip(".,!?;:\"'").lower()
+                        for h in clip.get("highlights", [])
+                        for token in h.split()
+                    }
                     out_path = os.path.join(tmp, f"clip_{i}.mp4")
                     render_clip(local_video, clip, words, highlight_words, out_path)
 
