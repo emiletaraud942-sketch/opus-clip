@@ -59,6 +59,21 @@ def get_supabase_client():
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
 
 
+def _check_header_safe(name: str, value: str):
+    """Vérifie qu'une valeur peut servir de header HTTP (latin-1 uniquement)
+    et lève une erreur précise (sans exposer la valeur complète) sinon."""
+    try:
+        value.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        bad_char = value[exc.start:exc.end]
+        raise RuntimeError(
+            f"Le secret Modal '{name}' (longueur {len(value)}) contient un "
+            f"caractère invalide {bad_char!r} à la position {exc.start}. "
+            "Recrée ce secret avec une valeur propre (sans espace, accent, "
+            "retour à la ligne, ou texte collé en trop)."
+        ) from exc
+
+
 def verify_user_token(token: str) -> str | None:
     """Vérifie un token JWT Supabase auprès de l'API Auth et renvoie l'user_id."""
     import requests
@@ -67,21 +82,17 @@ def verify_user_token(token: str) -> str | None:
     anon_key = os.environ["SUPABASE_ANON_KEY"].strip()
     supabase_url = os.environ["SUPABASE_URL"].strip()
 
-    try:
-        res = requests.get(
-            f"{supabase_url}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "apikey": anon_key,
-            },
-            timeout=10,
-        )
-    except UnicodeEncodeError as exc:
-        raise RuntimeError(
-            "Un des secrets Modal (SUPABASE_URL, SUPABASE_ANON_KEY) contient un "
-            "caractère invalide ou du texte collé en trop — recrée le secret "
-            "avec des valeurs propres."
-        ) from exc
+    _check_header_safe("token (envoyé par le site)", token)
+    _check_header_safe("SUPABASE_ANON_KEY", anon_key)
+
+    res = requests.get(
+        f"{supabase_url}/auth/v1/user",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "apikey": anon_key,
+        },
+        timeout=10,
+    )
 
     if res.status_code != 200:
         return None
