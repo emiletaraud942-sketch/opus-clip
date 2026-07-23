@@ -21,8 +21,8 @@ Déploiement (nécessite `pip install fastapi` en local, en plus de `modal`) :
   modal deploy modal_app.py
 
 Secrets Modal requis (une fois, via `modal secret create sortclip-secrets`) :
-  SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY,
-  ASSEMBLYAI_API_KEY, ANTHROPIC_API_KEY
+  SUPABASE_SERVICE_ROLE_KEY, ASSEMBLYAI_API_KEY, ANTHROPIC_API_KEY
+(L'URL Supabase et la clé anon, publiques, sont en dur dans ce fichier.)
 """
 
 import json
@@ -70,25 +70,50 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5500",
 ]
 
+# L'URL du projet et la clé anon sont PUBLIQUES par design (déjà exposées à
+# tous les visiteurs via supabase-config.js). On les met en dur ici, à
+# l'identique du front, plutôt que de dépendre d'un secret Modal qui s'est
+# déjà retrouvé corrompu lors de copier-coller PowerShell. Seule la clé
+# service_role (réellement secrète) reste dans le secret Modal.
+SUPABASE_URL = "https://kxnacycqaqhmvwdkprbq.supabase.co"
+SUPABASE_ANON_KEY = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt4bmFjeWNxYXFobXZ3ZGtwcmJxIiwicm9sZSI6"
+    "ImFub24iLCJpYXQiOjE3ODQzNjI2OTksImV4cCI6MjA5OTkzODY5OX0."
+    "2OJnqWcvP_g4ovGm1DGSGoY7TnCeKoMYjCilExGSe7w"
+)
+
+
+def _validate_supabase_key(name: str, key: str, expected_role: str):
+    """Décode le payload du JWT (sans vérifier la signature) pour détecter
+    une clé corrompue ou du mauvais type, avec un message d'erreur clair."""
+    import base64
+
+    try:
+        payload_b64 = key.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception as exc:
+        raise RuntimeError(
+            f"La clé '{name}' (longueur {len(key)}) est corrompue : impossible de "
+            "décoder son contenu. Recrée le secret Modal avec une valeur copiée "
+            "proprement depuis le dashboard Supabase."
+        ) from exc
+
+    role = payload.get("role")
+    if role != expected_role:
+        raise RuntimeError(
+            f"La clé '{name}' a le rôle '{role}' au lieu de '{expected_role}' — "
+            "les clés anon et service_role ont probablement été inversées."
+        )
+
 
 def get_supabase_client():
     from supabase import create_client
-    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
 
-
-def _check_header_safe(name: str, value: str):
-    """Vérifie qu'une valeur peut servir de header HTTP (latin-1 uniquement)
-    et lève une erreur précise (sans exposer la valeur complète) sinon."""
-    try:
-        value.encode("latin-1")
-    except UnicodeEncodeError as exc:
-        bad_char = value[exc.start:exc.end]
-        raise RuntimeError(
-            f"Le secret Modal '{name}' (longueur {len(value)}) contient un "
-            f"caractère invalide {bad_char!r} à la position {exc.start}. "
-            "Recrée ce secret avec une valeur propre (sans espace, accent, "
-            "retour à la ligne, ou texte collé en trop)."
-        ) from exc
+    service_key = os.environ["SUPABASE_SERVICE_ROLE_KEY"].strip()
+    _validate_supabase_key("SUPABASE_SERVICE_ROLE_KEY", service_key, "service_role")
+    return create_client(SUPABASE_URL, service_key)
 
 
 def verify_user_token(token: str) -> str | None:
@@ -96,24 +121,15 @@ def verify_user_token(token: str) -> str | None:
     import requests
 
     token = token.strip()
-    anon_key = os.environ["SUPABASE_ANON_KEY"].strip()
-    supabase_url = os.environ["SUPABASE_URL"].strip()
-
-    print(f"[verify_user_token] token reçu, longueur={len(token)}, vide={token == ''}")
-    print(f"[verify_user_token] SUPABASE_ANON_KEY longueur={len(anon_key)} (attendu 208), "
-          f"début={anon_key[:8]!r}, fin={anon_key[-8:]!r} (attendu début='eyJhbGci', fin='ExGSe7w'), "
-          f"SUPABASE_URL={supabase_url!r}")
-
-    _check_header_safe("token (envoyé par le site)", token)
-    _check_header_safe("SUPABASE_ANON_KEY", anon_key)
+    if not token:
+        print("[verify_user_token] aucun token reçu")
+        return None
 
     res = requests.get(
-        f"{supabase_url}/auth/v1/user",
+        f"{SUPABASE_URL}/auth/v1/user",
         headers={
             "Authorization": f"Bearer {token}",
-            "apikey": anon_key,
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (compatible; SortclipBackend/1.0)",
+            "apikey": SUPABASE_ANON_KEY,
         },
         timeout=10,
     )
