@@ -320,6 +320,12 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             if rows:
                 supabase.table("clips").insert(rows).execute()
 
+            if not youtube_url:
+                # La vidéo source a déjà été traitée : on la supprime du bucket
+                # "videos" pour ne pas payer du stockage indéfiniment. Les
+                # clips générés, eux, restent dans le bucket "clips".
+                supabase.storage.from_(SOURCE_BUCKET).remove([source_path])
+
         supabase.table("clip_jobs").update({"status": "done"}).eq("source_path", source_path).eq("user_id", user_id).execute()
     except Exception as exc:
         supabase.table("clip_jobs").update({"status": "error", "error": str(exc)}).eq("source_path", source_path).eq("user_id", user_id).execute()

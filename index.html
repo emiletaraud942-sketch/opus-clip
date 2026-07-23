@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Sortclip transforme vos podcasts, streams et webinars en clips courts prêts pour TikTok, Reels et Shorts, grâce à l'IA.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect x=%274%27 y=%274%27 width=%2756%27 height=%2756%27 rx=%2716%27 fill=%27%237c3aed%27/%3E%3Cpath d=%27M22 20 L22 44 L42 32 Z%27 fill=%27%230f0f14%27/%3E%3C/svg%3E">
 <title>Sortclip</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -105,9 +107,17 @@
     youtubeSubmitBtn.style.cursor = busy ? 'not-allowed' : 'pointer';
   }
 
+  const MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 Go
+
   videoUploadInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file || processingInFlight) return;
+
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      showUploadStatus('Ce fichier dépasse la taille maximale autorisée (2 Go). Choisis une vidéo plus légère.', '#fca5a5');
+      videoUploadInput.value = '';
+      return;
+    }
 
     document.getElementById('upload-filename').textContent = file.name;
 
@@ -241,6 +251,7 @@
   function renderLoggedIn(user) {
     const label = user.user_metadata?.full_name || user.email;
     authArea.innerHTML = `
+      <a href="mes-clips.html" class="nav-link">Mes clips</a>
       <span style="color:#d1d5db;">${label}</span>
       <a id="logout-btn" href="#" style="border:1px solid #2a2a35;padding:10px 20px;border-radius:9999px;">Déconnexion</a>
     `;
