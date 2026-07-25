@@ -63,6 +63,10 @@ MAX_CLIPS_PER_VIDEO = 6
 # tous statuts confondus (chaque tentative coûte de l'argent en API tierces).
 FREE_TIER_VIDEO_LIMIT = 3
 
+# Comptes exemptés de la limite ci-dessus (phase de test uniquement) — à
+# vider une fois les tests terminés pour que la limite s'applique à tous.
+TEST_ACCOUNT_EMAILS = {"emiletaraud942@gmail.com"}
+
 # Durée maximale acceptée pour une vidéo (upload ou lien YouTube), pour éviter
 # qu'un compte gratuit ne lance un traitement démesurément coûteux.
 MAX_VIDEO_DURATION_SECONDS = 60 * 60  # 60 minutes
@@ -119,8 +123,8 @@ def get_supabase_client():
     return create_client(SUPABASE_URL, service_key)
 
 
-def verify_user_token(token: str) -> str | None:
-    """Vérifie un token JWT Supabase auprès de l'API Auth et renvoie l'user_id."""
+def verify_user_token(token: str) -> tuple[str, str] | None:
+    """Vérifie un token JWT Supabase auprès de l'API Auth et renvoie (user_id, email)."""
     import requests
 
     token = token.strip()
@@ -141,7 +145,8 @@ def verify_user_token(token: str) -> str | None:
 
     if res.status_code != 200:
         return None
-    return res.json().get("id")
+    data = res.json()
+    return data.get("id"), data.get("email")
 
 
 # User-Agent d'un vrai navigateur : sans ça, YouTube identifie plus vite
@@ -591,17 +596,19 @@ def process():
         try:
             auth_header = request.headers.get("authorization", "")
             token = auth_header.replace("Bearer ", "")
-            user_id = verify_user_token(token)
-            if not user_id:
+            auth_result = verify_user_token(token)
+            if not auth_result:
                 return JSONResponse({"error": "Non authentifié"}, status_code=401)
+            user_id, email = auth_result
 
             supabase = get_supabase_client()
-            videos_used = count_user_videos(supabase, user_id)
-            if videos_used >= FREE_TIER_VIDEO_LIMIT:
-                return JSONResponse({
-                    "error": f"Tu as atteint la limite de {FREE_TIER_VIDEO_LIMIT} vidéos gratuites. "
-                             "Contacte-nous pour passer à un plan supérieur."
-                }, status_code=403)
+            if email not in TEST_ACCOUNT_EMAILS:
+                videos_used = count_user_videos(supabase, user_id)
+                if videos_used >= FREE_TIER_VIDEO_LIMIT:
+                    return JSONResponse({
+                        "error": f"Tu as atteint la limite de {FREE_TIER_VIDEO_LIMIT} vidéos gratuites. "
+                                 "Contacte-nous pour passer à un plan supérieur."
+                    }, status_code=403)
 
             youtube_url = payload.get("youtubeUrl")
             if youtube_url:
