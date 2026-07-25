@@ -305,5 +305,6 @@
   const { data: { session } } = await supabase.auth.getSession();
   if (session) renderLoggedIn(session.user);
 </script>
+<script defer src="/_vercel/insights/script.js"></script>
 </body>
 </html>
