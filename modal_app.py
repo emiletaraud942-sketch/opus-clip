@@ -58,10 +58,17 @@ SOURCE_BUCKET = "videos"
 CLIPS_BUCKET = "clips"
 MAX_CLIPS_PER_VIDEO = 6
 
-# Limite du plan gratuit tant qu'aucun système de facturation n'est branché
-# (voir tarifs.html : "3 vidéos offertes"). Ce nombre est comptabilisé à vie,
-# tous statuts confondus (chaque tentative coûte de l'argent en API tierces).
-FREE_TIER_VIDEO_LIMIT = 3
+# Limites d'usage par plan (voir tarifs.html). Le plan "free" est compté à
+# vie (3 vidéos offertes, une fois). Les plans payants sont comptés par mois
+# calendaire, tous statuts confondus (chaque tentative coûte de l'argent en
+# API tierces). Tant qu'aucune facturation (Stripe) n'est branchée, le plan
+# de chaque utilisateur est stocké dans la table Supabase "profiles" et mis
+# à jour manuellement.
+PLAN_MONTHLY_LIMITS = {
+    "free": 3,     # à vie, pas par mois — voir count_user_videos
+    "pro": 30,
+    "equipe": 60,
+}
 
 # Comptes exemptés de la limite ci-dessus (phase de test uniquement) — à
 # vider une fois les tests terminés pour que la limite s'applique à tous.
@@ -233,9 +240,35 @@ def get_video_duration(video_path: str) -> float:
     return float(result.stdout.strip())
 
 
-def count_user_videos(supabase, user_id: str) -> int:
-    res = supabase.table("clip_jobs").select("id", count="exact").eq("user_id", user_id).execute()
-    return res.count or 0
+def get_user_plan(supabase, user_id: str) -> str:
+    res = supabase.table("profiles").select("plan").eq("user_id", user_id).maybe_single().execute()
+    if res.data and res.data.get("plan") in PLAN_MONTHLY_LIMITS:
+        return res.data["plan"]
+    return "free"
+
+
+def check_quota(supabase, user_id: str) -> str | None:
+    """Retourne un message d'erreur si le quota du plan est atteint, sinon None."""
+    plan = get_user_plan(supabase, user_id)
+    limit = PLAN_MONTHLY_LIMITS[plan]
+
+    query = supabase.table("clip_jobs").select("id", count="exact").eq("user_id", user_id)
+    if plan == "free":
+        # Plan gratuit : quota à vie ("3 vidéos offertes"), pas remis à zéro.
+        used = query.execute().count or 0
+        period_label = ""
+    else:
+        # Plans payants : quota remis à zéro chaque mois calendaire.
+        month_start = time.strftime("%Y-%m-01T00:00:00Z", time.gmtime())
+        used = query.gte("created_at", month_start).execute().count or 0
+        period_label = " ce mois-ci"
+
+    if used >= limit:
+        return (
+            f"Tu as atteint la limite de {limit} vidéos{period_label} pour le plan "
+            f"'{plan}'. Contacte-nous pour passer à un plan supérieur."
+        )
+    return None
 
 
 def transcribe(video_path: str):
@@ -394,28 +427,74 @@ def fmt_ass_time(t: float) -> str:
     return f"{int(h)}:{int(m):02d}:{s:05.2f}"
 
 
-ASS_HEADER = """[Script Info]
+# Options de personnalisation des sous-titres proposées à l'utilisateur.
+# On ne fait jamais confiance à des valeurs libres venant du site : seuls
+# ces presets whitelistés peuvent être choisis, pour éviter d'injecter du
+# contenu arbitraire dans le fichier .ass passé à FFmpeg.
+SUBTITLE_COLOR_PRESETS = {
+    "blanc": "FFFFFF",
+    "jaune": "FFEB3B",
+    "rose": "F43F8E",
+    "cyan": "22E5FF",
+    "vert": "22FF88",
+}
+SUBTITLE_POSITION_PRESETS = {"bas": 2, "milieu": 5, "haut": 8}
+SUBTITLE_SIZE_PRESETS = {"petit": 32, "moyen": 44, "grand": 58}
+
+DEFAULT_SUBTITLE_STYLE = {
+    "textColor": "blanc",
+    "highlightColor": "jaune",
+    "position": "bas",
+    "size": "moyen",
+}
+
+
+def _hex_to_ass_color(hex_rgb: str) -> str:
+    r, g, b = hex_rgb[0:2], hex_rgb[2:4], hex_rgb[4:6]
+    return f"&H00{b}{g}{r}&"
+
+
+def resolve_subtitle_style(raw_style: dict | None) -> dict:
+    """Valide et complète le style de sous-titres choisi par l'utilisateur
+    avec les valeurs par défaut, en rejetant toute valeur hors whitelist."""
+    raw_style = raw_style or {}
+    style = dict(DEFAULT_SUBTITLE_STYLE)
+    for key in style:
+        value = raw_style.get(key)
+        if key in ("textColor", "highlightColor") and value in SUBTITLE_COLOR_PRESETS:
+            style[key] = value
+        elif key == "position" and value in SUBTITLE_POSITION_PRESETS:
+            style[key] = value
+        elif key == "size" and value in SUBTITLE_SIZE_PRESETS:
+            style[key] = value
+    return style
+
+
+def build_ass_header(style: dict) -> str:
+    text_color = _hex_to_ass_color(SUBTITLE_COLOR_PRESETS[style["textColor"]])
+    font_size = SUBTITLE_SIZE_PRESETS[style["size"]]
+    alignment = SUBTITLE_POSITION_PRESETS[style["position"]]
+    return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,44,&H00FFFFFF,&H00000000,&H00000000,0,3,3,0,2,20,20,80,1
+Style: Default,Arial,{font_size},{text_color},&H00000000,&H00000000,0,3,3,0,{alignment},20,20,80,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
-# Couleur d'emphase des mots-clés (format ASS &HAABBGGRR&) : jaune vif.
-HIGHLIGHT_COLOR = "&H0000FFFF&"
-DEFAULT_COLOR = "&H00FFFFFF&"
 
-
-def write_subtitles(words: list, highlight_words: set, segments: list, path: str):
+def write_subtitles(words: list, highlight_words: set, segments: list, path: str, style: dict):
     """Génère un fichier de sous-titres .ass, avec les horodatages remappés
     sur le montage compressé (silences retirés) et les mots-clés en couleur."""
-    lines = [ASS_HEADER]
+    highlight_ass_color = _hex_to_ass_color(SUBTITLE_COLOR_PRESETS[style["highlightColor"]])
+    default_ass_color = _hex_to_ass_color(SUBTITLE_COLOR_PRESETS[style["textColor"]])
+
+    lines = [build_ass_header(style)]
     chunk = []
 
     def flush():
@@ -427,7 +506,7 @@ def write_subtitles(words: list, highlight_words: set, segments: list, path: str
         for w in chunk:
             clean = w["word"].strip(".,!?;:\"'").lower()
             if clean in highlight_words:
-                parts.append(f"{{\\c{HIGHLIGHT_COLOR}}}{w['word']}{{\\c{DEFAULT_COLOR}}}")
+                parts.append(f"{{\\c{highlight_ass_color}}}{w['word']}{{\\c{default_ass_color}}}")
             else:
                 parts.append(w["word"])
         text = " ".join(parts)
@@ -443,13 +522,13 @@ def write_subtitles(words: list, highlight_words: set, segments: list, path: str
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
-def render_clip(source_path: str, clip: dict, words: list, highlight_words: set, out_path: str):
+def render_clip(source_path: str, clip: dict, words: list, highlight_words: set, style: dict, out_path: str):
     with tempfile.TemporaryDirectory() as tmp:
         clip_words = words_in_range(words, clip["start"], clip["end"])
         segments = build_keep_segments(clip_words, clip["start"], clip["end"])
 
         subs_path = os.path.join(tmp, "subs.ass")
-        write_subtitles(clip_words, highlight_words, segments, subs_path)
+        write_subtitles(clip_words, highlight_words, segments, subs_path, style)
 
         # Un morceau de filtre par segment gardé (coupe les silences), puis
         # on les recolle (concat) avant le recadrage et les sous-titres.
@@ -480,7 +559,8 @@ def render_clip(source_path: str, clip: dict, words: list, highlight_words: set,
 
 
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=2400)
-def process_video(user_id: str, source_path: str, youtube_url: str | None = None):
+def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None):
+    style = resolve_subtitle_style(subtitle_style)
     supabase = get_supabase_client()
     supabase.table("clip_jobs").insert({
         "user_id": user_id, "source_path": source_path, "status": "processing",
@@ -542,7 +622,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                         for token in h.split()
                     }
                     out_path = os.path.join(tmp, f"clip_{i}.mp4")
-                    render_clip(local_video, clip, words, highlight_words, out_path)
+                    render_clip(local_video, clip, words, highlight_words, style, out_path)
 
                     storage_path = f"{user_id}/{Path(source_path).stem}_clip{i}.mp4"
                     with open(out_path, "rb") as f:
@@ -618,12 +698,11 @@ def process():
 
             supabase = get_supabase_client()
             if email not in TEST_ACCOUNT_EMAILS:
-                videos_used = count_user_videos(supabase, user_id)
-                if videos_used >= FREE_TIER_VIDEO_LIMIT:
-                    return JSONResponse({
-                        "error": f"Tu as atteint la limite de {FREE_TIER_VIDEO_LIMIT} vidéos gratuites. "
-                                 "Contacte-nous pour passer à un plan supérieur."
-                    }, status_code=403)
+                quota_error = check_quota(supabase, user_id)
+                if quota_error:
+                    return JSONResponse({"error": quota_error}, status_code=403)
+
+            subtitle_style = resolve_subtitle_style(payload.get("subtitleStyle"))
 
             youtube_url = payload.get("youtubeUrl")
             if youtube_url:
@@ -631,14 +710,14 @@ def process():
                 # arrière-plan) : yt-dlp est trop lent pour bloquer la réponse
                 # HTTP ici, et le site attendrait sans retour visuel.
                 source_path = f"{user_id}/youtube_{int(time.time())}"
-                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url)
+                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style)
                 return {"status": "processing_started", "sourcePath": source_path}
 
             source_path = payload["path"]
             if not source_path.startswith(f"{user_id}/"):
                 return JSONResponse({"error": "Chemin invalide"}, status_code=403)
 
-            process_video.spawn(user_id=user_id, source_path=source_path)
+            process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style)
             return {"status": "processing_started", "sourcePath": source_path}
         except Exception as exc:
             print(f"[handle] Erreur non gérée : {exc}")

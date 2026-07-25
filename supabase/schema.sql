@@ -1,5 +1,21 @@
 -- À exécuter dans Supabase : SQL Editor > New query.
 
+-- Plan de chaque utilisateur : 'free' (défaut), 'pro' ou 'equipe'.
+-- Tant qu'aucune facturation (Stripe) n'est branchée, on met à jour cette
+-- valeur manuellement pour un utilisateur donné, ex :
+--   update profiles set plan = 'pro' where user_id = '<uuid-utilisateur>';
+create table if not exists profiles (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  plan text not null default 'free' check (plan in ('free', 'pro', 'equipe')),
+  created_at timestamptz not null default now()
+);
+
+alter table profiles enable row level security;
+
+create policy "Users read their own profile"
+  on profiles for select
+  using (auth.uid() = user_id);
+
 create table if not exists clip_jobs (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,

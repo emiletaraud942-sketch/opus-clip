@@ -58,6 +58,48 @@
       </div>
       <div style="font-size:11px;color:#6b7280;line-height:1.6;">Réservé aux vidéos dont vous êtes propriétaire ou titulaire des droits (ex. votre propre podcast). Voir nos <a href="cgu.html" style="color:#9ca3af;text-decoration:underline;">Conditions d'utilisation</a>.</div>
 
+      <div style="background:#17171d;border:1px solid #2a2a35;border-radius:16px;padding:16px 18px;margin-top:16px;">
+        <div style="font-size:13px;font-weight:700;margin-bottom:12px;">Personnaliser les sous-titres</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;">
+          <label style="font-size:11px;color:#9ca3af;">
+            Couleur du texte
+            <select id="subtitle-text-color" style="display:block;width:100%;margin-top:4px;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:13px;padding:8px;border-radius:8px;">
+              <option value="blanc">Blanc</option>
+              <option value="jaune">Jaune</option>
+              <option value="rose">Rose</option>
+              <option value="cyan">Cyan</option>
+              <option value="vert">Vert</option>
+            </select>
+          </label>
+          <label style="font-size:11px;color:#9ca3af;">
+            Couleur d'emphase
+            <select id="subtitle-highlight-color" style="display:block;width:100%;margin-top:4px;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:13px;padding:8px;border-radius:8px;">
+              <option value="jaune" selected>Jaune</option>
+              <option value="blanc">Blanc</option>
+              <option value="rose">Rose</option>
+              <option value="cyan">Cyan</option>
+              <option value="vert">Vert</option>
+            </select>
+          </label>
+          <label style="font-size:11px;color:#9ca3af;">
+            Position
+            <select id="subtitle-position" style="display:block;width:100%;margin-top:4px;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:13px;padding:8px;border-radius:8px;">
+              <option value="bas" selected>Bas</option>
+              <option value="milieu">Milieu</option>
+              <option value="haut">Haut</option>
+            </select>
+          </label>
+          <label style="font-size:11px;color:#9ca3af;">
+            Taille
+            <select id="subtitle-size" style="display:block;width:100%;margin-top:4px;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:13px;padding:8px;border-radius:8px;">
+              <option value="petit">Petit</option>
+              <option value="moyen" selected>Moyen</option>
+              <option value="grand">Grand</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
       <div id="clips-results" style="display:none;margin-top:28px;">
         <div style="font-size:14px;font-weight:700;margin-bottom:12px;">Tes clips générés</div>
         <div id="clips-list" style="display:flex;flex-direction:column;gap:10px;"></div>
@@ -109,6 +151,15 @@
 
   const MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 Go
 
+  function getSubtitleStyle() {
+    return {
+      textColor: document.getElementById('subtitle-text-color').value,
+      highlightColor: document.getElementById('subtitle-highlight-color').value,
+      position: document.getElementById('subtitle-position').value,
+      size: document.getElementById('subtitle-size').value,
+    };
+  }
+
   videoUploadInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file || processingInFlight) return;
@@ -147,7 +198,7 @@
       setBusy(false);
       return;
     }
-    await startProcessing({ path }, freshToken);
+    await startProcessing({ path, subtitleStyle: getSubtitleStyle() }, freshToken);
   });
 
   youtubeSubmitBtn.addEventListener('click', async () => {
@@ -169,7 +220,7 @@
       setBusy(false);
       return;
     }
-    await startProcessing({ youtubeUrl: url }, freshToken);
+    await startProcessing({ youtubeUrl: url, subtitleStyle: getSubtitleStyle() }, freshToken);
   });
 
   // Force un rafraîchissement du token juste avant l'appel à Modal, pour
