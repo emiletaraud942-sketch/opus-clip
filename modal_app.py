@@ -215,6 +215,15 @@ def download_youtube(url: str, out_path: str):
         ydl.download([url])
 
 
+def has_audio_stream(video_path: str) -> bool:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+         "stream=index", "-of", "csv=p=0", video_path],
+        capture_output=True, text=True, check=True,
+    )
+    return bool(result.stdout.strip())
+
+
 def get_video_duration(video_path: str) -> float:
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -510,6 +519,12 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                 raise RuntimeError(
                     f"Vidéo trop longue ({int(duration / 60)} min). "
                     f"La limite actuelle est de {MAX_VIDEO_DURATION_SECONDS // 60} minutes."
+                )
+
+            if not has_audio_stream(local_video):
+                raise RuntimeError(
+                    "Cette vidéo ne contient aucune piste audio exploitable — "
+                    "impossible de générer des clips sans parole à transcrire."
                 )
 
             words, full_text = transcribe(local_video)
