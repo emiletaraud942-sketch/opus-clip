@@ -4,12 +4,13 @@ Pipeline de traitement vidéo Sortclip : AssemblyAI + LLM + FFmpeg.
 Étapes pour une vidéo importée :
   1. Téléchargement depuis Supabase Storage (bucket "videos").
   2. Transcription avec horodatage mot par mot via l'API AssemblyAI.
-  3. Un LLM (Claude) lit la transcription complète et choisit les meilleurs
-     segments à clipper : début, fin, titre accrocheur, score de viralité
-     (0-100) et justification. C'est un jugement de LLM sur du texte, pas un
-     modèle entraîné sur des données réelles de performance sociale — à
-     considérer comme une bonne heuristique éditoriale, pas une vérité
-     statistique.
+  3. Des signaux objectifs sont extraits (CPU, sans abonnement) : pics
+     d'énergie audio, rires probables, changements de plan, présence de
+     visage. Ils guident et bonifient le scoring.
+  3bis. Un LLM (Claude) lit la transcription indexée (+ les signaux) et
+     choisit les meilleurs segments en INDEX DE MOTS, notés sur une rubrique
+     à cinq critères ; le code convertit en horodatages et calcule un score
+     pondéré. C'est une heuristique éditoriale, pas une vérité statistique.
   4. Chaque segment choisi est découpé (les silences trop longs sont
      retirés du montage), mis au format vertical 9:16 avec fond flou (cadre
      complet, rien n'est coupé) et sous-titré avec FFmpeg. Tous les
@@ -52,6 +53,13 @@ image = (
         "fastapi[standard]",
         "requests==2.32.3",
         "stripe==10.12.0",
+        # Signaux objectifs (CPU, aucun abonnement) : énergie/rires audio,
+        # changements de plan, présence de visage. Servent à guider et à
+        # bonifier le scoring des clips (cf. bloc [SIGNAUX] du prompt B).
+        "librosa==0.10.2",
+        "numpy==1.26.4",
+        "scenedetect==0.6.4",
+        "opencv-python-headless==4.10.0.84",
     )
     # yt-dlp installé depuis GitHub (master) : YouTube change ses protections
     # anti-robot en permanence, une version PyPI figée casse vite.
@@ -429,6 +437,107 @@ DÉCOUPE : le vrai hook est souvent 3-6s après le début brut du moment. Ne com
 ORDRE : remplis "reasoning" AVANT les notes. Observe d'abord, note ensuite."""
 
 
+def extract_signals(video_path: str) -> dict:
+    """Extrait des signaux objectifs de la vidéo (CPU, sans abonnement) :
+    - pics d'énergie audio (moments forts) et rires probables ;
+    - changements de plan (montage dynamique) ;
+    - présence de visage à l'écran.
+    Renvoie des listes d'horodatages (secondes). Ne fait jamais échouer le
+    pipeline : en cas d'erreur, renvoie des listes vides."""
+    signals = {
+        "energy_peaks": [], "laughter": [], "shot_changes": [], "face_ratio": None,
+    }
+
+    # --- Audio : énergie + rires probables ---
+    try:
+        import numpy as np
+        import librosa
+        y, sr = librosa.load(video_path, sr=16000, mono=True)
+        if len(y):
+            hop = 512
+            rms = librosa.feature.rms(y=y, hop_length=hop)[0]
+            times = librosa.frames_to_time(range(len(rms)), sr=sr, hop_length=hop)
+            if rms.size:
+                thr = float(np.mean(rms) + 1.5 * np.std(rms))
+                peaks = [round(float(t), 1) for t, v in zip(times, rms) if v > thr]
+                # On dédoublonne les pics rapprochés (< 2 s).
+                signals["energy_peaks"] = _dedupe_times(peaks, 2.0)
+            # Rires probables : forte énergie + centroïde spectral élevé (rires
+            # = bruit large bande aigu). Heuristique, pas une détection exacte.
+            cent = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop)[0]
+            if rms.size and cent.size:
+                e_thr = float(np.mean(rms) + 1.0 * np.std(rms))
+                c_thr = float(np.mean(cent) + 1.0 * np.std(cent))
+                laughs = [round(float(t), 1) for t, e, c in zip(times, rms, cent)
+                          if e > e_thr and c > c_thr]
+                signals["laughter"] = _dedupe_times(laughs, 3.0)
+    except Exception as exc:
+        print(f"[extract_signals] audio ignoré: {exc}")
+
+    # --- Changements de plan ---
+    try:
+        from scenedetect import detect, ContentDetector
+        scenes = detect(video_path, ContentDetector())
+        signals["shot_changes"] = [round(s.get_seconds(), 1) for s, _ in scenes]
+    except Exception as exc:
+        print(f"[extract_signals] scènes ignorées: {exc}")
+
+    # --- Présence de visage (échantillonnage d'images) ---
+    try:
+        import cv2
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        detector = cv2.CascadeClassifier(cascade_path)
+        cap = cv2.VideoCapture(video_path)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        # On échantillonne ~1 image toutes les 2 s, plafonné à 60 échantillons.
+        step = max(1, int(fps * 2))
+        sampled = 0
+        with_face = 0
+        idx = 0
+        while sampled < 60:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if len(detector.detectMultiScale(gray, 1.1, 5)):
+                with_face += 1
+            sampled += 1
+            idx += step
+            if total and idx >= total:
+                break
+        cap.release()
+        if sampled:
+            signals["face_ratio"] = round(with_face / sampled, 2)
+    except Exception as exc:
+        print(f"[extract_signals] visages ignorés: {exc}")
+
+    return signals
+
+
+def _dedupe_times(times: list, min_gap: float) -> list:
+    """Garde un horodatage tous les `min_gap` secondes maximum."""
+    out = []
+    last = -1e9
+    for t in sorted(times):
+        if t - last >= min_gap:
+            out.append(t)
+            last = t
+    return out
+
+
+def _signals_in_range(signals: dict, start: float, end: float) -> dict:
+    """Compte les signaux tombant dans [start, end] pour un clip donné."""
+    def count(key):
+        return sum(1 for t in signals.get(key, []) if start <= t <= end)
+    return {
+        "energy_peaks": count("energy_peaks"),
+        "laughter": count("laughter"),
+        "shot_changes": count("shot_changes"),
+    }
+
+
 def _indexed_transcript(words: list) -> str:
     """Transcription avec chaque mot préfixé de son index : (0)mot (1)mot ..."""
     return " ".join(f"({i}){w['word']}" for i, w in enumerate(words))
@@ -461,11 +570,44 @@ def _snap_indices_to_words(start_i: int, end_i: int, words: list) -> tuple[float
     return real_start, real_end
 
 
-def select_clips_with_llm(words: list, full_text: str) -> list:
+def _signals_summary(signals: dict | None) -> str:
+    """Résumé textuel des signaux objectifs, injecté dans le prompt de
+    sélection pour orienter Claude vers les moments à forte charge."""
+    if not signals:
+        return ""
+    peaks = signals.get("energy_peaks", [])
+    laughs = signals.get("laughter", [])
+    face = signals.get("face_ratio")
+    if not (peaks or laughs or face is not None):
+        return ""
+    lines = ["[SIGNAUX OBJECTIFS] — mesures automatiques, à utiliser comme preuves :"]
+    if laughs:
+        lines.append(f"- Rires probables (secondes) : {', '.join(str(t) for t in laughs[:40])}")
+    if peaks:
+        lines.append(f"- Pics d'énergie audio (secondes) : {', '.join(str(t) for t in peaks[:40])}")
+    if face is not None:
+        lines.append(f"- Visage visible sur {int(face * 100)}% des images échantillonnées")
+    lines.append(
+        "Privilégie les moments qui contiennent un rire ou un pic d'énergie : "
+        "ce sont des preuves objectives de charge émotionnelle. Un moment plat, "
+        "sans aucun signal, doit être noté sévèrement sur l'intensité émotionnelle."
+    )
+    return "\n".join(lines) + "\n\n"
+
+
+# Bonus déterministe ajouté au score final quand un clip contient des signaux
+# objectifs (rire = preuve la plus forte). Plafonné pour rester dans 0-100.
+SIGNAL_BONUS_LAUGHTER = 6
+SIGNAL_BONUS_ENERGY = 3
+SIGNAL_BONUS_MAX = 15
+
+
+def select_clips_with_llm(words: list, full_text: str, signals: dict | None = None) -> list:
     """Demande à Claude d'évaluer les meilleurs moments selon la rubrique à
     cinq critères (cf. PROMPTS-CLAUDE prompt B), en découpe par INDEX DE MOTS.
-    Convertit les index en horodatages réels, calcule un score pondéré, et
-    complète avec des segments automatiques si l'IA en renvoie trop peu."""
+    Les signaux objectifs (rires, énergie, plans) guident la sélection et
+    bonifient le score. Convertit les index en horodatages réels, calcule un
+    score pondéré, et complète avec des segments automatiques si trop peu."""
     from anthropic import Anthropic
 
     video_duration = words[-1]["end"] - words[0]["start"] if words else 0
@@ -478,7 +620,7 @@ def select_clips_with_llm(words: list, full_text: str) -> list:
 
 {_indexed_transcript(words)}
 
-Sélectionne les {target} MEILLEURS moments (au maximum {MAX_CLIPS_PER_VIDEO}) qui feraient de bons clips autonomes. Il est valide d'en proposer moins si le reste est faible, mais vise {target}.
+{_signals_summary(signals)}Sélectionne les {target} MEILLEURS moments (au maximum {MAX_CLIPS_PER_VIDEO}) qui feraient de bons clips autonomes. Il est valide d'en proposer moins si le reste est faible, mais vise {target}.
 
 Pour chaque clip, la découpe est en INDEX DE MOTS (start_word_index / end_word_index) pris dans la transcription ci-dessus. La durée réelle du clip doit tenir entre {MIN_CLIP_SECONDS} et {MAX_CLIP_SECONDS} secondes.
 
@@ -537,6 +679,16 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme exac
                 float(scores.get("narrative_completeness", 25)), 25
             )
         final = _final_score(scores) if scores else 60
+        # Bonus déterministe : un clip qui contient des rires / pics d'énergie
+        # est objectivement plus fort. Plafonné, score borné à 100.
+        if signals:
+            counts = _signals_in_range(signals, s, e)
+            bonus = min(
+                SIGNAL_BONUS_MAX,
+                SIGNAL_BONUS_LAUGHTER * min(counts["laughter"], 2)
+                + SIGNAL_BONUS_ENERGY * min(counts["energy_peaks"], 3),
+            )
+            final = min(100, final + bonus)
         valid_clips.append({
             "start": s, "end": e,
             "title": c.get("title", "Extrait"),
@@ -887,7 +1039,10 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             if not words:
                 raise RuntimeError("Aucune parole détectée dans cette vidéo — impossible de générer des clips.")
 
-            clips = select_clips_with_llm(words, full_text)
+            # Signaux objectifs (CPU) : rires, énergie, plans, visage.
+            # N'échoue jamais le pipeline (renvoie des listes vides sinon).
+            signals = extract_signals(local_video)
+            clips = select_clips_with_llm(words, full_text, signals=signals)
 
             rows = []
             for i, clip in enumerate(clips):
