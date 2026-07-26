@@ -35,8 +35,14 @@ create table if not exists clips (
   reason text,
   start_time numeric,
   end_time numeric,
+  caption text,
+  hashtags text[],
   created_at timestamptz not null default now()
 );
+
+-- Migration pour une table clips déjà existante (sans erreur si déjà fait) :
+alter table clips add column if not exists caption text;
+alter table clips add column if not exists hashtags text[];
 
 alter table clip_jobs enable row level security;
 alter table clips enable row level security;

@@ -567,6 +567,58 @@ def words_in_range(words: list, start: float, end: float) -> list:
     return [w for w in words if w["start"] >= start and w["end"] <= end]
 
 
+# Prompt D (cf. PROMPTS-CLAUDE) : légende + hashtags TikTok. Modèle Haiku,
+# peu coûteux — utilise la clé Anthropic existante, aucun nouvel abonnement.
+TIKTOK_COPY_SYSTEM = """Tu écris la légende TikTok d'un clip déjà monté. Tu n'écris que ce qui l'accompagne.
+
+La légende a un seul travail : donner une raison de commenter. Ce n'est PAS un résumé — le spectateur va voir la vidéo.
+
+Ce qui fonctionne : une question directe qui appelle un avis ; une affirmation légèrement discutable ; une phrase qui crée un manque ; une accroche sur la personne à qui on enverrait ça.
+À éviter : résumer le clip, "vous allez adorer", "regardez jusqu'à la fin", les emojis en rafale, le ton publicitaire, les majuscules criardes.
+
+Règles : français naturel, parlé, tutoiement. Maximum 150 caractères, l'essentiel dans les 40 premiers. Un emoji maximum, seulement s'il ajoute quelque chose."""
+
+
+def generate_tiktok_copy(clip_transcript: str) -> dict:
+    """Génère une légende TikTok + hashtags pour un clip (prompt D). Renvoie
+    {"caption": str, "hashtags": [str]}. Ne fait jamais échouer le montage :
+    en cas d'erreur, renvoie des valeurs vides."""
+    from anthropic import Anthropic
+
+    clip_transcript = (clip_transcript or "").strip()
+    if not clip_transcript:
+        return {"caption": "", "hashtags": []}
+
+    try:
+        client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=800,
+            system=[{
+                "type": "text",
+                "text": TIKTOK_COPY_SYSTEM,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": (
+                f"CLIP : {clip_transcript}\n\n"
+                "Écris la légende. Réponds UNIQUEMENT avec un objet JSON de la forme "
+                '{"caption": "...", "hashtags": ["motclé1", "motclé2", "motclé3"]} '
+                "(3 à 5 hashtags sans le #)."
+            )}],
+        )
+        raw = response.content[0].text.strip()
+        s, e = raw.find("{"), raw.rfind("}")
+        if s == -1 or e == -1:
+            return {"caption": "", "hashtags": []}
+        data = json.loads(raw[s:e + 1])
+        caption = str(data.get("caption", ""))[:150]
+        hashtags = [str(h).lstrip("#").strip() for h in data.get("hashtags", [])][:5]
+        return {"caption": caption, "hashtags": [h for h in hashtags if h]}
+    except Exception as exc:
+        print(f"[generate_tiktok_copy] échec (ignoré): {exc}")
+        return {"caption": "", "hashtags": []}
+
+
 # Silences (entre deux mots) plus longs que ce seuil sont coupés au montage.
 MIN_SILENCE_GAP = 0.6
 # Petite marge conservée autour de chaque coupe pour ne pas couper un mot trop court.
@@ -849,6 +901,13 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                             storage_path, f, {"content-type": "video/mp4", "upsert": "true"}
                         )
 
+                    # Légende + hashtags TikTok (prompt D, Haiku). Optionnel :
+                    # si la clé est absente ou l'appel échoue, on renvoie vide.
+                    clip_text = " ".join(
+                        w["word"] for w in words_in_range(words, clip["start"], clip["end"])
+                    )
+                    copy = generate_tiktok_copy(clip_text)
+
                     rows.append({
                         "user_id": user_id,
                         "source_path": source_path,
@@ -858,6 +917,8 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                         "reason": clip.get("reason", ""),
                         "start_time": clip["start"],
                         "end_time": clip["end"],
+                        "caption": copy["caption"],
+                        "hashtags": copy["hashtags"],
                     })
                 except Exception as clip_exc:
                     # Un clip qui échoue au montage ne doit pas faire échouer
@@ -868,7 +929,21 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             if not rows:
                 raise RuntimeError("Aucun clip n'a pu être monté avec succès pour cette vidéo.")
 
-            supabase.table("clips").insert(rows).execute()
+            try:
+                supabase.table("clips").insert(rows).execute()
+            except Exception as insert_exc:
+                # Rétro-compatibilité : si les colonnes caption/hashtags
+                # n'existent pas encore (migration non appliquée), on réessaie
+                # sans elles plutôt que de perdre tout le traitement.
+                if "caption" in str(insert_exc) or "hashtags" in str(insert_exc):
+                    print(f"[process_video] colonnes caption/hashtags absentes, insertion sans: {insert_exc}")
+                    stripped = [
+                        {k: v for k, v in r.items() if k not in ("caption", "hashtags")}
+                        for r in rows
+                    ]
+                    supabase.table("clips").insert(stripped).execute()
+                else:
+                    raise
 
             if not youtube_url:
                 # La vidéo source a déjà été traitée : on la supprime du bucket
