@@ -254,7 +254,10 @@ def download_youtube(url: str, out_path: str):
 
     opts = _apply_evasion(_base_ydl_opts())
     opts.update({
-        "format": "mp4/bestvideo+bestaudio",
+        # Prend la MEILLEURE vidéo disponible (jusqu'à 4K si la source
+        # l'offre) + le meilleur audio, au lieu de se limiter à un mp4
+        # potentiellement basse résolution.
+        "format": "bestvideo+bestaudio/best",
         "outtmpl": out_path,
         "merge_output_format": "mp4",
     })
@@ -597,8 +600,12 @@ def render_clip(source_path: str, clip: dict, words: list, highlight_words: set,
 
         filter_complex = ";".join(filter_parts)
         filter_complex += f";{concat_inputs}concat=n={len(segments)}:v=1:a=1[catv][cata]"
+        # Recadrage 9:16, puis mise à l'échelle avec l'algorithme lanczos
+        # (bien plus net que le bilinéaire par défaut lors d'un agrandissement),
+        # léger renforcement de netteté (unsharp), et sous-titres par-dessus.
         filter_complex += (
-            f";[catv]crop=ih*9/16:ih,scale={width}:{height},subtitles={subs_path}[outv]"
+            f";[catv]crop=ih*9/16:ih,scale={width}:{height}:flags=lanczos,"
+            f"unsharp=5:5:0.5:5:5:0.0,subtitles={subs_path}[outv]"
         )
 
         subprocess.run([
@@ -606,8 +613,11 @@ def render_clip(source_path: str, clip: dict, words: list, highlight_words: set,
             "-i", source_path,
             "-filter_complex", filter_complex,
             "-map", "[outv]", "-map", "[cata]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "aac",
+            # preset "slow" + CRF 18 = qualité nettement supérieure (moins
+            # de compression, plus de détails) au prix d'un encodage plus long.
+            "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
             out_path,
         ], check=True, capture_output=True)
 
