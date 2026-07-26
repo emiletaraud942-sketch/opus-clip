@@ -65,7 +65,7 @@ MAX_CLIPS_PER_VIDEO = 6
 # de chaque utilisateur est stocké dans la table Supabase "profiles" et mis
 # à jour manuellement.
 PLAN_MONTHLY_LIMITS = {
-    "free": 3,     # à vie, pas par mois — voir count_user_videos
+    "free": 3,     # à vie, pas par mois — voir check_quota
     "pro": 30,
     "equipe": 60,
 }
@@ -522,7 +522,21 @@ def write_subtitles(words: list, highlight_words: set, segments: list, path: str
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
-def render_clip(source_path: str, clip: dict, words: list, highlight_words: set, style: dict, out_path: str):
+# Résolutions de sortie disponibles (largeur x hauteur, format vertical 9:16).
+OUTPUT_RESOLUTIONS = {
+    "1080p": (1080, 1920),
+    "4k": (2160, 3840),
+}
+
+# Résolution max autorisée par plan — le 4K est réservé au plan Équipe,
+# quoi que le client réclame (jamais faire confiance à une entitlement
+# envoyée par le navigateur).
+PLAN_MAX_RESOLUTION = {"free": "1080p", "pro": "1080p", "equipe": "4k"}
+
+
+def render_clip(source_path: str, clip: dict, words: list, highlight_words: set, style: dict, resolution: str, out_path: str):
+    width, height = OUTPUT_RESOLUTIONS[resolution]
+
     with tempfile.TemporaryDirectory() as tmp:
         clip_words = words_in_range(words, clip["start"], clip["end"])
         segments = build_keep_segments(clip_words, clip["start"], clip["end"])
@@ -544,7 +558,7 @@ def render_clip(source_path: str, clip: dict, words: list, highlight_words: set,
         filter_complex = ";".join(filter_parts)
         filter_complex += f";{concat_inputs}concat=n={len(segments)}:v=1:a=1[catv][cata]"
         filter_complex += (
-            f";[catv]crop=ih*9/16:ih,scale=1080:1920,subtitles={subs_path}[outv]"
+            f";[catv]crop=ih*9/16:ih,scale={width}:{height},subtitles={subs_path}[outv]"
         )
 
         subprocess.run([
@@ -562,6 +576,9 @@ def render_clip(source_path: str, clip: dict, words: list, highlight_words: set,
 def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None):
     style = resolve_subtitle_style(subtitle_style)
     supabase = get_supabase_client()
+    plan = get_user_plan(supabase, user_id)
+    resolution = PLAN_MAX_RESOLUTION[plan]
+
     supabase.table("clip_jobs").insert({
         "user_id": user_id, "source_path": source_path, "status": "processing",
     }).execute()
@@ -622,7 +639,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                         for token in h.split()
                     }
                     out_path = os.path.join(tmp, f"clip_{i}.mp4")
-                    render_clip(local_video, clip, words, highlight_words, style, out_path)
+                    render_clip(local_video, clip, words, highlight_words, style, resolution, out_path)
 
                     storage_path = f"{user_id}/{Path(source_path).stem}_clip{i}.mp4"
                     with open(out_path, "rb") as f:
