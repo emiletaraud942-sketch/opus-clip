@@ -35,11 +35,14 @@ import os
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import modal
 from fastapi import Request
 from fastapi.responses import JSONResponse
+
+import pricing_config as pricing
 
 app = modal.App("sortclip-pipeline")
 
@@ -64,6 +67,8 @@ image = (
     # yt-dlp installé depuis GitHub (master) : YouTube change ses protections
     # anti-robot en permanence, une version PyPI figée casse vite.
     .pip_install("yt-dlp @ git+https://github.com/yt-dlp/yt-dlp.git")
+    # Le module de config économique doit voyager avec l'app sur Modal.
+    .add_local_python_source("pricing_config")
 )
 
 SOURCE_BUCKET = "videos"
@@ -292,33 +297,146 @@ def get_video_duration(video_path: str) -> float:
 
 def get_user_plan(supabase, user_id: str) -> str:
     res = supabase.table("profiles").select("plan").eq("user_id", user_id).maybe_single().execute()
-    if res.data and res.data.get("plan") in PLAN_MONTHLY_LIMITS:
+    if res.data and res.data.get("plan") in pricing.PLANS:
         return res.data["plan"]
     return "free"
 
 
-def check_quota(supabase, user_id: str) -> str | None:
-    """Retourne un message d'erreur si le quota du plan est atteint, sinon None."""
-    plan = get_user_plan(supabase, user_id)
-    limit = PLAN_MONTHLY_LIMITS[plan]
+# =====================================================================
+# Quota en MINUTES DE SOURCE (Phase 1)
+# Le décompte se fait en minutes analysées, pas en nombre de vidéos.
+# Ordre de consommation : crédits (expiration la plus proche) d'abord,
+# puis quota d'abonnement. Réservation-débit AVANT traitement, avec
+# remboursement intégral en cas d'échec.
+# =====================================================================
 
-    query = supabase.table("clip_jobs").select("id", count="exact").eq("user_id", user_id)
-    if plan == "free":
-        # Plan gratuit : quota à vie ("3 vidéos offertes"), pas remis à zéro.
-        used = query.execute().count or 0
-        period_label = ""
-    else:
-        # Plans payants : quota remis à zéro chaque mois calendaire.
-        month_start = time.strftime("%Y-%m-01T00:00:00Z", time.gmtime())
-        used = query.gte("created_at", month_start).execute().count or 0
-        period_label = " ce mois-ci"
+def _now():
+    return datetime.now(timezone.utc)
 
-    if used >= limit:
-        return (
-            f"Tu as atteint la limite de {limit} vidéos{period_label} pour le plan "
-            f"'{plan}'. Contacte-nous pour passer à un plan supérieur."
+
+def _period_start_str() -> str:
+    return _now().strftime("%Y-%m-01")
+
+
+def _reset_period_if_needed(supabase, user_id: str) -> float:
+    """Remet le compteur d'abonnement à zéro si on a changé de mois.
+    Retourne les minutes déjà consommées sur la période courante."""
+    res = supabase.table("profiles").select("minutes_used,quota_period_start").eq("user_id", user_id).maybe_single().execute()
+    row = res.data or {}
+    period = _period_start_str()
+    if str(row.get("quota_period_start")) != period:
+        supabase.table("profiles").upsert(
+            {"user_id": user_id, "minutes_used": 0, "quota_period_start": period}
+        ).execute()
+        return 0.0
+    return float(row.get("minutes_used") or 0)
+
+
+def _subscription_remaining(supabase, user_id: str, plan: str) -> float:
+    used = _reset_period_if_needed(supabase, user_id)
+    return max(0.0, pricing.plan_minutes(plan) - used)
+
+
+def _active_packs(supabase, user_id: str) -> list:
+    """Lots de crédits non expirés avec du solde, du plus proche à expirer
+    au plus lointain (on consomme les périssables d'abord)."""
+    now_iso = _now().isoformat()
+    res = (
+        supabase.table("credit_packs").select("*")
+        .eq("user_id", user_id).gt("minutes_remaining", 0)
+        .gte("expires_at", now_iso).order("expires_at").execute()
+    )
+    return res.data or []
+
+
+def available_minutes(supabase, user_id: str, plan: str) -> float:
+    credit = sum(float(p["minutes_remaining"]) for p in _active_packs(supabase, user_id))
+    return _subscription_remaining(supabase, user_id, plan) + credit
+
+
+def enforce_source_caps(plan: str, seconds: float):
+    """Refuse une source trop longue. Plafond dur 4 h, puis plafond du plan."""
+    if seconds > pricing.GLOBAL_MAX_SOURCE_SECONDS:
+        raise RuntimeError(
+            "Cette source dépasse 4 h : elle ne peut être traitée sur aucun plan. "
+            "Découpe-la avant de l'envoyer."
         )
-    return None
+    cap = pricing.plan_max_video_seconds(plan)
+    if seconds > cap:
+        raise RuntimeError(
+            f"Cette vidéo dure {int(seconds / 60)} min, au-delà de la limite de "
+            f"{cap // 60} min de ton plan « {plan} ». Passe à un plan supérieur "
+            "ou découpe la vidéo."
+        )
+
+
+def count_active_jobs(supabase, user_id: str) -> int:
+    return (
+        supabase.table("clip_jobs").select("id", count="exact")
+        .eq("user_id", user_id).eq("status", "processing").execute().count or 0
+    )
+
+
+def reserve_minutes(supabase, user_id: str, plan: str, source_id: str, minutes: float) -> list:
+    """Réserve `minutes` : crédits (expiration proche) d'abord, puis abonnement.
+    Retourne les lignes usage_log réservées (pour commit ou remboursement)."""
+    remaining = float(minutes)
+    reservations = []
+    for pack in _active_packs(supabase, user_id):
+        if remaining <= 1e-9:
+            break
+        avail = float(pack["minutes_remaining"])
+        take = min(remaining, avail)
+        supabase.table("credit_packs").update(
+            {"minutes_remaining": avail - take}
+        ).eq("id", pack["id"]).execute()
+        r = supabase.table("usage_log").insert({
+            "user_id": user_id, "source_id": source_id, "minutes_debited": take,
+            "debited_from": "credit_pack", "credit_pack_id": pack["id"], "status": "reserved",
+        }).execute()
+        reservations.append(r.data[0])
+        remaining -= take
+    if remaining > 1e-9:
+        used = _reset_period_if_needed(supabase, user_id)
+        supabase.table("profiles").upsert({
+            "user_id": user_id, "minutes_used": used + remaining,
+            "quota_period_start": _period_start_str(),
+        }).execute()
+        r = supabase.table("usage_log").insert({
+            "user_id": user_id, "source_id": source_id, "minutes_debited": remaining,
+            "debited_from": "subscription", "status": "reserved",
+        }).execute()
+        reservations.append(r.data[0])
+    return reservations
+
+
+def commit_reservations(supabase, reservations: list, source_seconds: float | None = None):
+    for r in reservations:
+        upd = {"status": "committed"}
+        if source_seconds is not None:
+            upd["source_duration_s"] = source_seconds
+        supabase.table("usage_log").update(upd).eq("id", r["id"]).execute()
+
+
+def refund_reservations(supabase, user_id: str, reservations: list):
+    """Restitue intégralement les minutes réservées (échec du traitement)."""
+    for r in reservations:
+        if r.get("status") == "refunded":
+            continue
+        m = float(r["minutes_debited"])
+        if r["debited_from"] == "credit_pack" and r.get("credit_pack_id"):
+            pack = supabase.table("credit_packs").select("minutes_remaining").eq("id", r["credit_pack_id"]).maybe_single().execute()
+            if pack.data:
+                supabase.table("credit_packs").update(
+                    {"minutes_remaining": float(pack.data["minutes_remaining"]) + m}
+                ).eq("id", r["credit_pack_id"]).execute()
+        else:
+            used = _reset_period_if_needed(supabase, user_id)
+            supabase.table("profiles").upsert({
+                "user_id": user_id, "minutes_used": max(0.0, used - m),
+                "quota_period_start": _period_start_str(),
+            }).execute()
+        supabase.table("usage_log").update({"status": "refunded"}).eq("id", r["id"]).execute()
 
 
 def transcribe(video_path: str):
@@ -979,11 +1097,12 @@ def render_clip(source_path: str, clip: dict, words: list, style: dict, resoluti
 
 
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=2400)
-def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None):
+def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False):
     style = resolve_subtitle_style(subtitle_style)
     supabase = get_supabase_client()
     plan = get_user_plan(supabase, user_id)
     resolution = PLAN_MAX_RESOLUTION[plan]
+    reservations = []
 
     supabase.table("clip_jobs").insert({
         "user_id": user_id, "source_path": source_path, "status": "processing",
@@ -1011,29 +1130,39 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                         "supprimée, ou accès bloqué)."
                     ) from exc
 
-                if yt_duration > MAX_VIDEO_DURATION_SECONDS:
-                    raise RuntimeError(
-                        f"Vidéo trop longue ({int(yt_duration / 60)} min). "
-                        f"La limite actuelle est de {MAX_VIDEO_DURATION_SECONDS // 60} minutes."
-                    )
+                # Contrôle du plafond AVANT de télécharger (évite de rapatrier
+                # une vidéo de plusieurs heures pour rien).
+                if not skip_billing:
+                    enforce_source_caps(plan, yt_duration)
 
                 download_youtube(youtube_url, local_video)
             else:
                 video_bytes = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
                 Path(local_video).write_bytes(video_bytes)
 
+            # Durée réelle et autoritaire de la source téléchargée.
             duration = get_video_duration(local_video)
-            if duration > MAX_VIDEO_DURATION_SECONDS:
-                raise RuntimeError(
-                    f"Vidéo trop longue ({int(duration / 60)} min). "
-                    f"La limite actuelle est de {MAX_VIDEO_DURATION_SECONDS // 60} minutes."
-                )
+            if not skip_billing:
+                enforce_source_caps(plan, duration)
 
             if not has_audio_stream(local_video):
                 raise RuntimeError(
                     "Cette vidéo ne contient aucune piste audio exploitable — "
                     "impossible de générer des clips sans parole à transcrire."
                 )
+
+            # Réservation-débit AVANT le premier poste de coût (transcription).
+            # Contrôle autoritaire du solde ici (notamment pour YouTube, sans
+            # portée UX synchrone). En cas d'échec ultérieur, refund intégral.
+            if not skip_billing:
+                need_minutes = duration / 60.0
+                if need_minutes > available_minutes(supabase, user_id, plan) + 1e-6:
+                    raise RuntimeError(
+                        f"Solde de minutes insuffisant : cette vidéo demande "
+                        f"{need_minutes:.0f} min. Recharge avec le pack crédits "
+                        "(60 min, 7,90 €) ou passe à un plan supérieur."
+                    )
+                reservations = reserve_minutes(supabase, user_id, plan, source_path, need_minutes)
 
             words, full_text = transcribe(local_video)
             if not words:
@@ -1106,8 +1235,19 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                 # clips générés, eux, restent dans le bucket "clips".
                 supabase.storage.from_(SOURCE_BUCKET).remove([source_path])
 
+        # Succès : on valide définitivement les minutes réservées.
+        if reservations:
+            commit_reservations(supabase, reservations, source_seconds=duration)
+
         supabase.table("clip_jobs").update({"status": "done"}).eq("source_path", source_path).eq("user_id", user_id).execute()
     except Exception as exc:
+        # Échec, quelle qu'en soit la cause : remboursement INTÉGRAL des
+        # minutes réservées. Un utilisateur ne perd jamais de minutes sur un bug.
+        if reservations:
+            try:
+                refund_reservations(supabase, user_id, reservations)
+            except Exception as refund_exc:
+                print(f"[process_video] Échec du remboursement (à traiter manuellement): {refund_exc}")
         supabase.table("clip_jobs").update({"status": "error", "error": str(exc)}).eq("source_path", source_path).eq("user_id", user_id).execute()
         raise
 
@@ -1146,27 +1286,68 @@ def process():
             user_id, email = auth_result
 
             supabase = get_supabase_client()
-            if email not in TEST_ACCOUNT_EMAILS:
-                quota_error = check_quota(supabase, user_id)
-                if quota_error:
-                    return JSONResponse({"error": quota_error}, status_code=403)
+            skip_billing = email in TEST_ACCOUNT_EMAILS
+            plan = get_user_plan(supabase, user_id)
+
+            # Garde-fou : traitements simultanés limités par plan.
+            if not skip_billing and count_active_jobs(supabase, user_id) >= pricing.plan_concurrency(plan):
+                return JSONResponse({
+                    "error": (
+                        f"Tu as déjà {pricing.plan_concurrency(plan)} traitement(s) en "
+                        f"cours (maximum du plan « {plan} »). Attends qu'ils se terminent."
+                    ),
+                    "code": "too_many_concurrent",
+                }, status_code=429)
+
+            # Portée UX synchrone (upload) : le front envoie la durée lue via la
+            # balise <video>. On refuse AVANT tout traitement si la vidéo dépasse
+            # le plafond ou si le solde de minutes est insuffisant. Le contrôle
+            # AUTORITAIRE (ffprobe/yt-dlp) est refait côté traitement.
+            hint = payload.get("sourceDurationSeconds")
+            if hint and not skip_billing:
+                try:
+                    seconds = float(hint)
+                except (TypeError, ValueError):
+                    seconds = 0
+                if seconds > 0:
+                    try:
+                        enforce_source_caps(plan, seconds)
+                    except RuntimeError as cap_err:
+                        return JSONResponse(
+                            {"error": str(cap_err), "code": "video_too_long"},
+                            status_code=403,
+                        )
+                    need = seconds / 60.0
+                    avail = available_minutes(supabase, user_id, plan)
+                    if need > avail + 1e-6:
+                        return JSONResponse({
+                            "error": (
+                                f"Il te reste {avail:.0f} min et cette vidéo en demande "
+                                f"{need:.0f}. Recharge avec le pack crédits (60 min, 7,90 €) "
+                                "ou passe à un plan supérieur."
+                            ),
+                            "code": "insufficient_minutes",
+                            "proposePack": True,
+                            "availableMinutes": round(avail, 1),
+                            "neededMinutes": round(need, 1),
+                        }, status_code=403)
 
             subtitle_style = resolve_subtitle_style(payload.get("subtitleStyle"))
 
             youtube_url = payload.get("youtubeUrl")
             if youtube_url:
-                # La validation de la durée est faite dans process_video (en
-                # arrière-plan) : yt-dlp est trop lent pour bloquer la réponse
-                # HTTP ici, et le site attendrait sans retour visuel.
+                # Pour YouTube, la durée n'est pas connue côté client : le
+                # contrôle (plafond + solde) est fait dans process_video avant
+                # tout traitement coûteux.
                 source_path = f"{user_id}/youtube_{int(time.time())}"
-                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style)
+                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style, skip_billing=skip_billing)
                 return {"status": "processing_started", "sourcePath": source_path}
 
             source_path = payload["path"]
             if not source_path.startswith(f"{user_id}/"):
                 return JSONResponse({"error": "Chemin invalide"}, status_code=403)
 
-            process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style)
+            process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style, skip_billing=skip_billing)
             return {"status": "processing_started", "sourcePath": source_path}
         except Exception as exc:
             print(f"[handle] Erreur non gérée : {exc}")
