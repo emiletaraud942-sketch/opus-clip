@@ -214,6 +214,16 @@ def _apply_evasion(opts: dict) -> dict:
     "Sign in to confirm you're not a bot"."""
     cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
     if cookies:
+        # Les cookies peuvent être fournis soit en clair (format Netscape),
+        # soit encodés en base64 (recommandé : une seule ligne, sûr dans un
+        # fichier .env). On tente d'abord de décoder le base64.
+        import base64
+        try:
+            decoded = base64.b64decode(cookies).decode("utf-8")
+            if "\t" in decoded or "youtube" in decoded.lower():
+                cookies = decoded
+        except Exception:
+            pass
         cookie_file = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
         Path(cookie_file).write_text(cookies, encoding="utf-8")
         opts["cookiefile"] = cookie_file
