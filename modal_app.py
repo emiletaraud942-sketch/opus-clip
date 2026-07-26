@@ -24,6 +24,9 @@ Déploiement (nécessite `pip install fastapi` en local, en plus de `modal`) :
 Secrets Modal requis (une fois, via `modal secret create sortclip-secrets`) :
   SUPABASE_SERVICE_ROLE_KEY, ASSEMBLYAI_API_KEY, ANTHROPIC_API_KEY,
   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+Secrets optionnels (contournement anti-robot YouTube) :
+  YOUTUBE_COOKIES (cookies.txt d'un compte connecté),
+  YOUTUBE_PROXY (proxy résidentiel http://user:pass@host:port)
 (L'URL Supabase et la clé anon, publiques, sont en dur dans ce fichier.)
 """
 
@@ -199,22 +202,38 @@ def _base_ydl_opts() -> dict:
     }
 
 
-def _apply_cookies(opts: dict) -> dict:
-    """Ajoute des cookies YouTube si le secret YOUTUBE_COOKIES est fourni
-    (format Netscape cookies.txt). C'est ce qui fait vraiment la différence
-    face à la détection anti-robot sur IP de datacenter."""
+def _apply_evasion(opts: dict) -> dict:
+    """Ajoute les contournements anti-détection YouTube si les secrets
+    correspondants sont fournis :
+      - YOUTUBE_COOKIES : cookies d'un compte connecté (format Netscape
+        cookies.txt). yt-dlp s'authentifie alors comme un vrai utilisateur.
+      - YOUTUBE_PROXY : proxy (idéalement résidentiel) pour ne pas sortir
+        depuis une IP de datacenter Modal, que YouTube bloque massivement.
+        Format : http://user:pass@host:port
+    C'est la combinaison des deux qui contourne le plus fiablement le
+    "Sign in to confirm you're not a bot"."""
     cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
     if cookies:
         cookie_file = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
         Path(cookie_file).write_text(cookies, encoding="utf-8")
         opts["cookiefile"] = cookie_file
+
+    proxy = os.environ.get("YOUTUBE_PROXY", "").strip()
+    if proxy:
+        opts["proxy"] = proxy
+
     return opts
+
+
+def _is_bot_block(error: Exception) -> bool:
+    msg = str(error).lower()
+    return any(s in msg for s in ("sign in to confirm", "not a bot", "captcha", "403"))
 
 
 def get_youtube_duration(url: str) -> float:
     import yt_dlp
 
-    opts = _apply_cookies(_base_ydl_opts())
+    opts = _apply_evasion(_base_ydl_opts())
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return info.get("duration") or 0
@@ -223,7 +242,7 @@ def get_youtube_duration(url: str) -> float:
 def download_youtube(url: str, out_path: str):
     import yt_dlp
 
-    opts = _apply_cookies(_base_ydl_opts())
+    opts = _apply_evasion(_base_ydl_opts())
     opts.update({
         "format": "mp4/bestvideo+bestaudio",
         "outtmpl": out_path,
@@ -606,6 +625,11 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                 try:
                     yt_duration = get_youtube_duration(youtube_url)
                 except Exception as exc:
+                    if _is_bot_block(exc):
+                        raise RuntimeError(
+                            "YouTube a bloqué le téléchargement (protection anti-robot). "
+                            "Importe plutôt le fichier vidéo directement depuis ton ordinateur."
+                        ) from exc
                     raise RuntimeError(
                         "Impossible de lire ce lien YouTube (vidéo privée, "
                         "supprimée, ou accès bloqué)."
