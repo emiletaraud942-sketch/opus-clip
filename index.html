@@ -72,16 +72,6 @@
             </select>
           </label>
           <label style="font-size:11px;color:#9ca3af;">
-            Couleur d'emphase
-            <select id="subtitle-highlight-color" style="display:block;width:100%;margin-top:4px;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:13px;padding:8px;border-radius:8px;">
-              <option value="jaune" selected>Jaune</option>
-              <option value="blanc">Blanc</option>
-              <option value="rose">Rose</option>
-              <option value="cyan">Cyan</option>
-              <option value="vert">Vert</option>
-            </select>
-          </label>
-          <label style="font-size:11px;color:#9ca3af;">
             Position
             <select id="subtitle-position" style="display:block;width:100%;margin-top:4px;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:13px;padding:8px;border-radius:8px;">
               <option value="bas" selected>Bas</option>
@@ -154,7 +144,6 @@
   function getSubtitleStyle() {
     return {
       textColor: document.getElementById('subtitle-text-color').value,
-      highlightColor: document.getElementById('subtitle-highlight-color').value,
       position: document.getElementById('subtitle-position').value,
       size: document.getElementById('subtitle-size').value,
     };

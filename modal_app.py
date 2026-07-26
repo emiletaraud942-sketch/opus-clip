@@ -6,15 +6,14 @@ Pipeline de traitement vidéo Sortclip : AssemblyAI + LLM + FFmpeg.
   2. Transcription avec horodatage mot par mot via l'API AssemblyAI.
   3. Un LLM (Claude) lit la transcription complète et choisit les meilleurs
      segments à clipper : début, fin, titre accrocheur, score de viralité
-     (0-100), justification, et les mots-clés à mettre en emphase dans les
-     sous-titres (AssemblyAI Auto Highlights n'étant pas disponible en
-     français, c'est Claude qui s'en charge). C'est un jugement de LLM sur
-     du texte, pas un modèle entraîné sur des données réelles de
-     performance sociale — à considérer comme une bonne heuristique
-     éditoriale, pas une vérité statistique.
+     (0-100) et justification. C'est un jugement de LLM sur du texte, pas un
+     modèle entraîné sur des données réelles de performance sociale — à
+     considérer comme une bonne heuristique éditoriale, pas une vérité
+     statistique.
   4. Chaque segment choisi est découpé (les silences trop longs sont
-     retirés du montage), recadré en 9:16 et sous-titré avec FFmpeg — les
-     mots-clés détectés à l'étape 2 apparaissent en couleur.
+     retirés du montage), mis au format vertical 9:16 avec fond flou (cadre
+     complet, rien n'est coupé) et sous-titré avec FFmpeg. Tous les
+     sous-titres ont une couleur uniforme.
   5. Les clips sont envoyés dans le bucket Supabase "clips" et
      enregistrés dans la table "clips".
 
@@ -343,10 +342,7 @@ def transcribe(video_path: str):
 
 
 def select_clips_with_llm(words: list, full_text: str) -> list:
-    """Demande à Claude de choisir les meilleurs segments à clipper, et
-    d'indiquer pour chacun les mots-clés à mettre en emphase dans les
-    sous-titres (à la place d'AssemblyAI Auto Highlights, indisponible
-    en français)."""
+    """Demande à Claude de choisir les meilleurs segments à clipper."""
     from anthropic import Anthropic
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -365,14 +361,9 @@ Choisis jusqu'à {MAX_CLIPS_PER_VIDEO} extraits qui feraient de bons clips court
 moments à forte accroche, anecdotes, punchlines, révélations, conseils actionnables.
 Chaque extrait doit durer entre 15 et 75 secondes.
 
-Pour chaque extrait, indique aussi 3 à 6 mots ou courtes expressions du texte
-(reprises exactement telles qu'elles apparaissent dans la transcription) à
-mettre en emphase visuellement dans les sous-titres : les mots les plus
-percutants/mémorables de l'extrait.
-
 Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme :
 [
-  {{"start": 12.4, "end": 45.2, "title": "titre accrocheur court", "score": 87, "reason": "pourquoi ce moment est fort", "highlights": ["mot1", "expression 2"]}}
+  {{"start": 12.4, "end": 45.2, "title": "titre accrocheur court", "score": 87, "reason": "pourquoi ce moment est fort"}}
 ]"""
 
     response = client.messages.create(
@@ -486,7 +477,6 @@ SUBTITLE_SIZE_PRESETS = {"petit": 32, "moyen": 44, "grand": 58}
 
 DEFAULT_SUBTITLE_STYLE = {
     "textColor": "blanc",
-    "highlightColor": "jaune",
     "position": "bas",
     "size": "moyen",
 }
@@ -504,7 +494,7 @@ def resolve_subtitle_style(raw_style: dict | None) -> dict:
     style = dict(DEFAULT_SUBTITLE_STYLE)
     for key in style:
         value = raw_style.get(key)
-        if key in ("textColor", "highlightColor") and value in SUBTITLE_COLOR_PRESETS:
+        if key == "textColor" and value in SUBTITLE_COLOR_PRESETS:
             style[key] = value
         elif key == "position" and value in SUBTITLE_POSITION_PRESETS:
             style[key] = value
@@ -531,12 +521,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
-def write_subtitles(words: list, highlight_words: set, segments: list, path: str, style: dict):
+def write_subtitles(words: list, segments: list, path: str, style: dict):
     """Génère un fichier de sous-titres .ass, avec les horodatages remappés
-    sur le montage compressé (silences retirés) et les mots-clés en couleur."""
-    highlight_ass_color = _hex_to_ass_color(SUBTITLE_COLOR_PRESETS[style["highlightColor"]])
-    default_ass_color = _hex_to_ass_color(SUBTITLE_COLOR_PRESETS[style["textColor"]])
-
+    sur le montage compressé (silences retirés). TOUS les mots ont la même
+    couleur (celle choisie par l'utilisateur) — aucune mise en emphase par
+    mot, pour un rendu uniforme."""
     lines = [build_ass_header(style)]
     chunk = []
 
@@ -545,14 +534,7 @@ def write_subtitles(words: list, highlight_words: set, segments: list, path: str
             return
         start = remap_time(chunk[0]["start"], segments)
         end = remap_time(chunk[-1]["end"], segments)
-        parts = []
-        for w in chunk:
-            clean = w["word"].strip(".,!?;:\"'").lower()
-            if clean in highlight_words:
-                parts.append(f"{{\\c{highlight_ass_color}}}{w['word']}{{\\c{default_ass_color}}}")
-            else:
-                parts.append(w["word"])
-        text = " ".join(parts)
+        text = " ".join(w["word"] for w in chunk)
         lines.append(f"Dialogue: 0,{fmt_ass_time(start)},{fmt_ass_time(end)},Default,,0,0,0,,{text}")
 
     for w in words:
@@ -577,7 +559,7 @@ OUTPUT_RESOLUTIONS = {
 PLAN_MAX_RESOLUTION = {"free": "1080p", "pro": "1080p", "equipe": "4k"}
 
 
-def render_clip(source_path: str, clip: dict, words: list, highlight_words: set, style: dict, resolution: str, out_path: str):
+def render_clip(source_path: str, clip: dict, words: list, style: dict, resolution: str, out_path: str):
     width, height = OUTPUT_RESOLUTIONS[resolution]
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -585,10 +567,10 @@ def render_clip(source_path: str, clip: dict, words: list, highlight_words: set,
         segments = build_keep_segments(clip_words, clip["start"], clip["end"])
 
         subs_path = os.path.join(tmp, "subs.ass")
-        write_subtitles(clip_words, highlight_words, segments, subs_path, style)
+        write_subtitles(clip_words, segments, subs_path, style)
 
         # Un morceau de filtre par segment gardé (coupe les silences), puis
-        # on les recolle (concat) avant le recadrage et les sous-titres.
+        # on les recolle (concat).
         filter_parts = []
         concat_inputs = ""
         for i, (s, e) in enumerate(segments):
@@ -600,12 +582,18 @@ def render_clip(source_path: str, clip: dict, words: list, highlight_words: set,
 
         filter_complex = ";".join(filter_parts)
         filter_complex += f";{concat_inputs}concat=n={len(segments)}:v=1:a=1[catv][cata]"
-        # Recadrage 9:16, puis mise à l'échelle avec l'algorithme lanczos
-        # (bien plus net que le bilinéaire par défaut lors d'un agrandissement),
-        # léger renforcement de netteté (unsharp), et sous-titres par-dessus.
+        # Cadrage vertical "cadre complet + fond flou" : au lieu de rogner le
+        # centre en aveugle (ce qui coupe souvent le sujet), on affiche
+        # l'image entière (aucun élément perdu), redimensionnée pour tenir
+        # dans le 9:16, et on remplit le haut/bas avec une version zoomée et
+        # floutée de la même image. Rendu professionnel, rien n'est coupé.
         filter_complex += (
-            f";[catv]crop=ih*9/16:ih,scale={width}:{height}:flags=lanczos,"
-            f"unsharp=5:5:0.5:5:5:0.0,subtitles={subs_path}[outv]"
+            f";[catv]split=2[main][bg];"
+            f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={width}:{height},gblur=sigma=25[bgb];"
+            f"[main]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
+            f"[bgb][fg]overlay=(W-w)/2:(H-h)/2[comp];"
+            f"[comp]unsharp=5:5:0.3:5:5:0.0,subtitles={subs_path}[outv]"
         )
 
         subprocess.run([
@@ -688,13 +676,8 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             rows = []
             for i, clip in enumerate(clips):
                 try:
-                    highlight_words = {
-                        token.strip(".,!?;:\"'").lower()
-                        for h in clip.get("highlights", [])
-                        for token in h.split()
-                    }
                     out_path = os.path.join(tmp, f"clip_{i}.mp4")
-                    render_clip(local_video, clip, words, highlight_words, style, resolution, out_path)
+                    render_clip(local_video, clip, words, style, resolution, out_path)
 
                     storage_path = f"{user_id}/{Path(source_path).stem}_clip{i}.mp4"
                     with open(out_path, "rb") as f:
