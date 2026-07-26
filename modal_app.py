@@ -341,14 +341,71 @@ def transcribe(video_path: str):
     return words, transcript.text
 
 
+# Bornes de durée d'un clip (en secondes). Un clip hors de ces bornes est
+# soit corrigé (fin ramenée), soit rejeté.
+MIN_CLIP_SECONDS = 15
+MAX_CLIP_SECONDS = 90
+# On vise environ un clip par tranche de cette durée de vidéo source.
+TARGET_SECONDS_PER_CLIP = 75
+
+
+def _target_clip_count(video_duration: float) -> int:
+    """Nombre de clips visé selon la longueur de la vidéo (au moins 1)."""
+    return max(1, min(MAX_CLIPS_PER_VIDEO, round(video_duration / TARGET_SECONDS_PER_CLIP)))
+
+
+def _snap_to_words(start: float, end: float, words: list) -> tuple[float, float] | None:
+    """Aligne les bornes proposées sur de vrais mots (début du 1er mot inclus,
+    fin du dernier mot inclus) et vérifie que la durée est raisonnable.
+    Retourne None si le segment est inexploitable."""
+    inside = [w for w in words if w["end"] > start and w["start"] < end]
+    if not inside:
+        return None
+    real_start = inside[0]["start"]
+    real_end = inside[-1]["end"]
+    # Si trop long, on ramène la fin pour tenir dans MAX_CLIP_SECONDS.
+    if real_end - real_start > MAX_CLIP_SECONDS:
+        real_end = real_start + MAX_CLIP_SECONDS
+    if real_end - real_start < MIN_CLIP_SECONDS:
+        return None
+    return real_start, real_end
+
+
+def _heuristic_clips(words: list, needed: int) -> list:
+    """Solution de secours : découpe la transcription en `needed` segments
+    consécutifs d'environ TARGET_SECONDS_PER_CLIP, alignés sur les mots.
+    Utilisé quand l'IA renvoie trop peu de clips valides."""
+    if not words:
+        return []
+    total = words[-1]["end"] - words[0]["start"]
+    chunk = max(MIN_CLIP_SECONDS, min(MAX_CLIP_SECONDS, total / max(1, needed)))
+    clips = []
+    t = words[0]["start"]
+    while t < words[-1]["end"] and len(clips) < needed:
+        snapped = _snap_to_words(t, t + chunk, words)
+        if snapped:
+            s, e = snapped
+            clips.append({
+                "start": s, "end": e,
+                "title": "Extrait", "score": 60, "reason": "Segment automatique",
+            })
+            t = e
+        else:
+            t += chunk
+    return clips
+
+
 def select_clips_with_llm(words: list, full_text: str) -> list:
-    """Demande à Claude de choisir les meilleurs segments à clipper."""
+    """Demande à Claude de choisir les meilleurs segments à clipper, valide
+    et corrige les bornes contre les vrais horodatages, et complète avec des
+    segments automatiques si l'IA en renvoie trop peu."""
     from anthropic import Anthropic
+
+    video_duration = words[-1]["end"] - words[0]["start"] if words else 0
+    target = _target_clip_count(video_duration)
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    # On donne au modèle la transcription avec horodatage approximatif
-    # par phrase pour qu'il puisse choisir des bornes start/end précises.
     timestamped_transcript = "\n".join(
         f"[{w['start']:.1f}s] {w['word']}" for w in words
     )
@@ -357,9 +414,11 @@ def select_clips_with_llm(words: list, full_text: str) -> list:
 
 {timestamped_transcript}
 
-Choisis jusqu'à {MAX_CLIPS_PER_VIDEO} extraits qui feraient de bons clips courts pour TikTok/Reels/Shorts :
+Choisis EXACTEMENT {target} extrait(s) (ni plus ni moins) qui feraient de bons clips courts pour TikTok/Reels/Shorts :
 moments à forte accroche, anecdotes, punchlines, révélations, conseils actionnables.
-Chaque extrait doit durer entre 15 et 75 secondes.
+IMPÉRATIF : chaque extrait doit durer entre {MIN_CLIP_SECONDS} et {MAX_CLIP_SECONDS} secondes
+(un extrait plus court n'a aucun intérêt). 'start' et 'end' sont des temps en
+secondes tirés des horodatages ci-dessus, avec end - start >= {MIN_CLIP_SECONDS}.
 
 Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme :
 [
@@ -368,29 +427,50 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme :
 
     response = client.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=2000,
+        max_tokens=4000,
         messages=[{"role": "user", "content": prompt}],
     )
 
     raw = response.content[0].text.strip()
-    # Robustesse si le modèle entoure quand même le JSON de texte/markdown.
     start_idx = raw.find("[")
     end_idx = raw.rfind("]")
-    if start_idx == -1 or end_idx == -1:
-        raise RuntimeError("Le modèle IA n'a pas renvoyé de sélection de clips exploitable.")
 
-    try:
-        clips = json.loads(raw[start_idx:end_idx + 1])
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Réponse IA illisible pour sélectionner les clips : {exc}") from exc
+    llm_clips = []
+    if start_idx != -1 and end_idx != -1:
+        try:
+            llm_clips = json.loads(raw[start_idx:end_idx + 1])
+        except json.JSONDecodeError:
+            llm_clips = []
 
     valid_clips = []
-    for c in clips:
-        if not all(k in c for k in ("start", "end", "title", "score")):
+    for c in llm_clips:
+        if not isinstance(c, dict) or "start" not in c or "end" not in c:
             continue
-        if c["end"] <= c["start"]:
+        try:
+            snapped = _snap_to_words(float(c["start"]), float(c["end"]), words)
+        except (TypeError, ValueError):
             continue
-        valid_clips.append(c)
+        if not snapped:
+            continue
+        s, e = snapped
+        valid_clips.append({
+            "start": s, "end": e,
+            "title": c.get("title", "Extrait"),
+            "score": c.get("score", 70),
+            "reason": c.get("reason", ""),
+        })
+
+    # Si l'IA n'a pas fourni assez de clips exploitables, on complète avec
+    # des segments automatiques pour ne jamais renvoyer un résultat vide/1s.
+    if len(valid_clips) < target:
+        existing = [(c["start"], c["end"]) for c in valid_clips]
+        for hc in _heuristic_clips(words, target):
+            overlaps = any(hc["start"] < e and hc["end"] > s for s, e in existing)
+            if not overlaps:
+                valid_clips.append(hc)
+                existing.append((hc["start"], hc["end"]))
+            if len(valid_clips) >= target:
+                break
 
     if not valid_clips:
         raise RuntimeError("Aucun moment exploitable n'a été trouvé dans cette vidéo.")
