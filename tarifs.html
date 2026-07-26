@@ -48,13 +48,12 @@
         <div style="font-size:14px;color:#f9a8c9;font-weight:600;margin-bottom:8px;">Pro</div>
         <div style="font-size:36px;font-weight:700;font-family:'Space Grotesk',sans-serif;margin-bottom:4px;">19€<span style="font-size:14px;color:#9ca3af;font-weight:400;"> /mois</span></div>
         <div style="font-size:13px;color:#6b7280;margin-bottom:24px;">Pour les créateurs réguliers</div>
-        <a href="signup.html" style="display:block;text-align:center;background:#f43f8e;color:#fff;font-weight:700;font-size:14px;padding:12px;border-radius:9999px;margin-bottom:24px;">Essayer 7 jours gratuits</a>
+        <button id="subscribe-pro" style="display:block;width:100%;text-align:center;background:#f43f8e;color:#fff;font-weight:700;font-size:14px;padding:12px;border:none;border-radius:9999px;margin-bottom:24px;cursor:pointer;">S'abonner au plan Pro</button>
         <ul style="list-style:none;padding:0;margin:0;font-size:13px;color:#d1d5db;line-height:2.2;">
           <li>30 vidéos par mois</li>
           <li>Sous-titres personnalisables</li>
           <li>Score viral IA</li>
           <li>Export en 1080p</li>
-          <li>Publication directe sur les réseaux</li>
         </ul>
       </div>
 
@@ -62,15 +61,16 @@
         <div style="font-size:14px;color:#9ca3af;font-weight:600;margin-bottom:8px;">Équipe</div>
         <div style="font-size:36px;font-weight:700;font-family:'Space Grotesk',sans-serif;margin-bottom:4px;">49€<span style="font-size:14px;color:#9ca3af;font-weight:400;"> /mois</span></div>
         <div style="font-size:13px;color:#6b7280;margin-bottom:24px;">Pour les agences et équipes</div>
-        <a href="signup.html" style="display:block;text-align:center;background:#20202a;border:1px solid #2a2a35;color:#fff;font-weight:700;font-size:14px;padding:12px;border-radius:9999px;margin-bottom:24px;">Commencer</a>
+        <button id="subscribe-equipe" style="display:block;width:100%;text-align:center;background:#20202a;border:1px solid #2a2a35;color:#fff;font-weight:700;font-size:14px;padding:12px;border-radius:9999px;margin-bottom:24px;cursor:pointer;">S'abonner au plan Équipe</button>
         <ul style="list-style:none;padding:0;margin:0;font-size:13px;color:#d1d5db;line-height:2.2;">
-          <li>Vidéos illimitées</li>
-          <li>Jusqu'à 5 membres</li>
+          <li>60 vidéos par mois</li>
           <li>Export en 4K</li>
           <li>Support prioritaire</li>
         </ul>
       </div>
     </div>
+
+    <div id="billing-error" style="display:none;max-width:480px;margin:0 auto 24px;background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.4);color:#fca5a5;font-size:13px;padding:12px 14px;border-radius:10px;text-align:center;"></div>
 
     <div style="text-align:center;font-size:13px;color:#6b7280;">
       Des besoins spécifiques ? <a href="#" style="color:#f9a8c9;text-decoration:underline;">Contactez-nous</a>
@@ -78,6 +78,60 @@
   </div>
 </section>
 <script type="module" src="auth-redirect.js"></script>
+<script type="module">
+  import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+  import { SUPABASE_URL, SUPABASE_ANON_KEY } from './supabase-config.js';
+  import { BILLING_URL } from './billing-config.js';
+
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const errorBox = document.getElementById('billing-error');
+
+  function showBillingError(message) {
+    errorBox.textContent = message;
+    errorBox.style.display = 'block';
+  }
+
+  async function subscribe(plan, button) {
+    errorBox.style.display = 'none';
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      window.location.href = 'signup.html';
+      return;
+    }
+
+    button.disabled = true;
+    const originalText = button.textContent;
+    button.textContent = 'Redirection vers le paiement...';
+
+    try {
+      const res = await fetch(`${BILLING_URL}/checkout`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ plan }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data.url) {
+        showBillingError(data.error ?? "Impossible de lancer le paiement. Réessaie dans un instant.");
+        button.disabled = false;
+        button.textContent = originalText;
+        return;
+      }
+
+      window.location.href = data.url;
+    } catch (err) {
+      showBillingError("Impossible de contacter le serveur de paiement. Vérifie ta connexion et réessaie.");
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+
+  document.getElementById('subscribe-pro').addEventListener('click', (e) => subscribe('pro', e.target));
+  document.getElementById('subscribe-equipe').addEventListener('click', (e) => subscribe('equipe', e.target));
+</script>
 <script defer src="/_vercel/insights/script.js"></script>
 </body>
 </html>

@@ -22,7 +22,8 @@ Déploiement (nécessite `pip install fastapi` en local, en plus de `modal`) :
   modal deploy modal_app.py
 
 Secrets Modal requis (une fois, via `modal secret create sortclip-secrets`) :
-  SUPABASE_SERVICE_ROLE_KEY, ASSEMBLYAI_API_KEY, ANTHROPIC_API_KEY
+  SUPABASE_SERVICE_ROLE_KEY, ASSEMBLYAI_API_KEY, ANTHROPIC_API_KEY,
+  STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 (L'URL Supabase et la clé anon, publiques, sont en dur dans ce fichier.)
 """
 
@@ -48,6 +49,7 @@ image = (
         "supabase==2.7.4",
         "fastapi[standard]",
         "requests==2.32.3",
+        "stripe==10.12.0",
     )
     # yt-dlp installé depuis GitHub (master) : YouTube change ses protections
     # anti-robot en permanence, une version PyPI figée casse vite.
@@ -83,6 +85,15 @@ ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:5500",
 ]
+
+SITE_URL = "https://opus-clip-alpha.vercel.app"
+
+# Correspondance entre les produits Stripe (créés dans le dashboard) et les
+# plans internes de Sortclip.
+STRIPE_PRODUCT_TO_PLAN = {
+    "prod_UxMunMagkVFAZR": "pro",
+    "prod_UxMtXHRHDGQljE": "equipe",
+}
 
 # L'URL du projet et la clé anon sont PUBLIQUES par design (déjà exposées à
 # tous les visiteurs via supabase-config.js). On les met en dur ici, à
@@ -739,5 +750,109 @@ def process():
         except Exception as exc:
             print(f"[handle] Erreur non gérée : {exc}")
             return JSONResponse({"error": f"Erreur serveur : {exc}"}, status_code=500)
+
+    return web_app
+
+
+@app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")])
+@modal.asgi_app()
+def billing():
+    """Endpoints de facturation Stripe.
+    - POST /checkout : crée une session de paiement Stripe pour un plan.
+      Header requis : Authorization: Bearer <token utilisateur Supabase>
+      Body attendu : {"plan": "pro"} ou {"plan": "equipe"}
+      Retourne {"url": "https://checkout.stripe.com/..."} à rediriger.
+    - POST /webhook : reçu par Stripe après un paiement réussi, met à jour
+      le plan de l'utilisateur dans la table "profiles"."""
+    import stripe
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+
+    stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+
+    web_app = FastAPI()
+    web_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_methods=["POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+    @web_app.post("/checkout")
+    async def checkout(payload: dict, request: Request):
+        try:
+            auth_header = request.headers.get("authorization", "")
+            token = auth_header.replace("Bearer ", "")
+            auth_result = verify_user_token(token)
+            if not auth_result:
+                return JSONResponse({"error": "Non authentifié"}, status_code=401)
+            user_id, email = auth_result
+
+            plan = payload.get("plan")
+            product_id = next(
+                (pid for pid, p in STRIPE_PRODUCT_TO_PLAN.items() if p == plan), None
+            )
+            if not product_id:
+                return JSONResponse({"error": "Plan invalide"}, status_code=400)
+
+            product = stripe.Product.retrieve(product_id, expand=["default_price"])
+            if not product.default_price:
+                return JSONResponse(
+                    {"error": f"Le produit Stripe '{product_id}' n'a pas de prix par défaut configuré."},
+                    status_code=500,
+                )
+
+            session = stripe.checkout.Session.create(
+                mode="subscription",
+                line_items=[{"price": product.default_price.id, "quantity": 1}],
+                customer_email=email,
+                client_reference_id=user_id,
+                metadata={"user_id": user_id, "plan": plan},
+                subscription_data={"metadata": {"user_id": user_id, "plan": plan}},
+                success_url=f"{SITE_URL}/tarifs.html?paiement=succes",
+                cancel_url=f"{SITE_URL}/tarifs.html?paiement=annule",
+            )
+            return {"url": session.url}
+        except Exception as exc:
+            print(f"[checkout] Erreur : {exc}")
+            return JSONResponse({"error": f"Erreur serveur : {exc}"}, status_code=500)
+
+    @web_app.post("/webhook")
+    async def webhook(request: Request):
+        payload_bytes = await request.body()
+        sig_header = request.headers.get("stripe-signature", "")
+        webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+
+        if not webhook_secret:
+            print("[webhook] STRIPE_WEBHOOK_SECRET absent — configure-le après avoir créé le webhook dans Stripe.")
+            return JSONResponse({"error": "Webhook non configuré côté serveur."}, status_code=500)
+
+        try:
+            event = stripe.Webhook.construct_event(payload_bytes, sig_header, webhook_secret)
+        except (ValueError, stripe.error.SignatureVerificationError) as exc:
+            print(f"[webhook] Signature invalide : {exc}")
+            return JSONResponse({"error": "Signature invalide"}, status_code=400)
+
+        if event["type"] == "checkout.session.completed":
+            session = event["data"]["object"]
+            user_id = session.get("client_reference_id") or session.get("metadata", {}).get("user_id")
+            plan = session.get("metadata", {}).get("plan")
+
+            if user_id and plan in PLAN_MONTHLY_LIMITS:
+                supabase = get_supabase_client()
+                supabase.table("profiles").upsert({"user_id": user_id, "plan": plan}).execute()
+                print(f"[webhook] Plan de {user_id} mis à jour vers '{plan}'.")
+
+        elif event["type"] in ("customer.subscription.deleted", "customer.subscription.updated"):
+            subscription = event["data"]["object"]
+            user_id = subscription.get("metadata", {}).get("user_id")
+            status = subscription.get("status")
+
+            if user_id and status in ("canceled", "unpaid", "incomplete_expired"):
+                supabase = get_supabase_client()
+                supabase.table("profiles").upsert({"user_id": user_id, "plan": "free"}).execute()
+                print(f"[webhook] Abonnement de {user_id} terminé — retour au plan 'free'.")
+
+        return {"received": True}
 
     return web_app
