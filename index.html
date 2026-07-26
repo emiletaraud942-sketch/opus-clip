@@ -339,10 +339,21 @@
 
   const authArea = document.getElementById('auth-area');
 
-  function renderLoggedIn(user) {
+  const PLAN_LABELS = { free: 'Gratuit', pro: 'Pro', equipe: 'Équipe' };
+
+  async function renderLoggedIn(user) {
     const label = user.user_metadata?.full_name || user.email;
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('plan')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    const planLabel = PLAN_LABELS[profile?.plan] || PLAN_LABELS.free;
+
     authArea.innerHTML = `
       <a href="mes-clips.html" class="nav-link">Mes clips</a>
+      <span style="background:rgba(244,63,142,.15);color:#f9a8c9;font-size:11px;font-weight:700;padding:4px 10px;border-radius:9999px;">Plan ${planLabel}</span>
       <span style="color:#d1d5db;">${label}</span>
       <a id="logout-btn" href="#" style="border:1px solid #2a2a35;padding:10px 20px;border-radius:9999px;">Déconnexion</a>
     `;
@@ -354,7 +365,7 @@
   }
 
   const { data: { session } } = await supabase.auth.getSession();
-  if (session) renderLoggedIn(session.user);
+  if (session) await renderLoggedIn(session.user);
 </script>
 <script defer src="/_vercel/insights/script.js"></script>
 </body>
