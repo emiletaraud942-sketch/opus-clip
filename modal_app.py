@@ -395,10 +395,77 @@ def _heuristic_clips(words: list, needed: int) -> list:
     return clips
 
 
+# Pondération des cinq critères de la rubrique (cf. SPEC-MOTEUR-CLIPPING §6 /
+# PROMPTS-CLAUDE prompt B). Le hook est le critère le plus déterminant.
+SCORE_WEIGHTS = {
+    "hook_strength": 0.30,
+    "context_autonomy": 0.20,
+    "narrative_completeness": 0.20,
+    "emotional_intensity": 0.15,
+    "engagement_trigger": 0.15,
+}
+
+# Rubrique de notation condensée depuis PROMPTS-CLAUDE (prompt B). Les règles
+# anti-dérive sont conservées : découpe en INDEX DE MOTS (jamais en secondes),
+# calibrage médiane ~45, séparation contexte/contenu, raisonnement avant notes,
+# rejet possible.
+CLIP_SCORING_SYSTEM = """Tu es directeur de création spécialisé en vidéo courte verticale (TikTok, Reels, Shorts). Dans une vidéo longue, tu reconnais les vingt secondes qui vont fonctionner et celles qui n'iront nulle part.
+
+Un clip n'est pas un extrait : c'est une œuvre autonome qui se trouve avoir été découpée dans une vidéo longue. Le spectateur n'a jamais vu la source, ignore le contexte, et décide en 1,5 seconde s'il continue ou s'il scrolle. Juge toujours depuis cette position.
+
+On te donne une transcription où CHAQUE MOT est indexé sous la forme (index)mot. Tu choisis les meilleurs moments et, pour chacun, tu proposes une découpe EN INDEX DE MOTS (jamais en secondes — le code convertit).
+
+RUBRIQUE — cinq critères notés 0-100, ancrages contraignants :
+1. hook_strength : force des 3 premières secondes de TA découpe. 0-20 remplissage/silence/"alors euh" ; 41-60 l'intérêt n'arrive qu'après 4-5s ; 81-100 les 3 premières secondes se suffisent (question, affirmation clivante, réaction, curiosité instantanée).
+2. context_autonomy : se comprend sans la source. 0-20 pronom orphelin/"ce truc-là"/"comme je disais"/renvoi visuel absent ; 61-80 tout ce qu'il faut est dans le clip.
+3. narrative_completeness : arc complet, chute incluse. 0-20 fragment ou chute hors du clip ; 61-80 mise en place→tension→chute bien proportionné ; 81-100 s'arrête pile sur le point fort.
+4. emotional_intensity : pic émotionnel. 0-20 plat/informatif ; 81-100 éclat de rire, sidération, cri, silence gêné, ressenti en moins de 2s.
+5. engagement_trigger : raison concrète de commenter/partager/sauvegarder. 0-20 rien à retenir ; 61-80 avis discutable ou phrase citable.
+
+CALIBRAGE CONTRAIGNANT : la majorité des segments ne font pas de bons clips. Un candidat correct sans plus se note ~45 sur chaque critère. Au-delà de 75 tu affirmes qu'il est meilleur que 9 clips sur 10 — justifie-le. Noter généreusement rend le produit inutile.
+
+DÉCOUPE : le vrai hook est souvent 3-6s après le début brut du moment. Ne commence jamais sur "alors","donc","euh","bah","en fait","du coup","voilà". Coupe immédiatement après le dernier mot fort, jamais sur une conjonction ou une transition.
+
+ORDRE : remplis "reasoning" AVANT les notes. Observe d'abord, note ensuite."""
+
+
+def _indexed_transcript(words: list) -> str:
+    """Transcription avec chaque mot préfixé de son index : (0)mot (1)mot ..."""
+    return " ".join(f"({i}){w['word']}" for i, w in enumerate(words))
+
+
+def _final_score(scores: dict) -> int:
+    """Score final pondéré (0-100) à partir des cinq critères."""
+    total = sum(SCORE_WEIGHTS[k] * float(scores.get(k, 45)) for k in SCORE_WEIGHTS)
+    return int(round(total))
+
+
+def _snap_indices_to_words(start_i: int, end_i: int, words: list) -> tuple[float, float] | None:
+    """Convertit une découpe en index de mots vers des horodatages, en
+    validant les bornes et la durée (protection anti-hallucination : le modèle
+    ne produit jamais de secondes, seulement des index)."""
+    n = len(words)
+    if not (0 <= start_i < end_i < n):
+        return None
+    real_start = words[start_i]["start"]
+    real_end = words[end_i]["end"]
+    if real_end - real_start > MAX_CLIP_SECONDS:
+        # On ramène la fin sur le dernier mot tenant dans MAX_CLIP_SECONDS.
+        cutoff = real_start + MAX_CLIP_SECONDS
+        for j in range(end_i, start_i, -1):
+            if words[j]["end"] <= cutoff:
+                real_end = words[j]["end"]
+                break
+    if real_end - real_start < MIN_CLIP_SECONDS:
+        return None
+    return real_start, real_end
+
+
 def select_clips_with_llm(words: list, full_text: str) -> list:
-    """Demande à Claude de choisir les meilleurs segments à clipper, valide
-    et corrige les bornes contre les vrais horodatages, et complète avec des
-    segments automatiques si l'IA en renvoie trop peu."""
+    """Demande à Claude d'évaluer les meilleurs moments selon la rubrique à
+    cinq critères (cf. PROMPTS-CLAUDE prompt B), en découpe par INDEX DE MOTS.
+    Convertit les index en horodatages réels, calcule un score pondéré, et
+    complète avec des segments automatiques si l'IA en renvoie trop peu."""
     from anthropic import Anthropic
 
     video_duration = words[-1]["end"] - words[0]["start"] if words else 0
@@ -406,29 +473,36 @@ def select_clips_with_llm(words: list, full_text: str) -> list:
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    timestamped_transcript = "\n".join(
-        f"[{w['start']:.1f}s] {w['word']}" for w in words
-    )
+    n = len(words)
+    user_message = f"""VIDÉO SOURCE — transcription indexée ({n} mots) :
 
-    prompt = f"""Voici la transcription horodatée (en secondes) d'une vidéo (podcast, stream ou webinar).
+{_indexed_transcript(words)}
 
-{timestamped_transcript}
+Sélectionne les {target} MEILLEURS moments (au maximum {MAX_CLIPS_PER_VIDEO}) qui feraient de bons clips autonomes. Il est valide d'en proposer moins si le reste est faible, mais vise {target}.
 
-Choisis EXACTEMENT {target} extrait(s) (ni plus ni moins) qui feraient de bons clips courts pour TikTok/Reels/Shorts :
-moments à forte accroche, anecdotes, punchlines, révélations, conseils actionnables.
-IMPÉRATIF : chaque extrait doit durer entre {MIN_CLIP_SECONDS} et {MAX_CLIP_SECONDS} secondes
-(un extrait plus court n'a aucun intérêt). 'start' et 'end' sont des temps en
-secondes tirés des horodatages ci-dessus, avec end - start >= {MIN_CLIP_SECONDS}.
+Pour chaque clip, la découpe est en INDEX DE MOTS (start_word_index / end_word_index) pris dans la transcription ci-dessus. La durée réelle du clip doit tenir entre {MIN_CLIP_SECONDS} et {MAX_CLIP_SECONDS} secondes.
 
-Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme :
+Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme exacte :
 [
-  {{"start": 12.4, "end": 45.2, "title": "titre accrocheur court", "score": 87, "reason": "pourquoi ce moment est fort"}}
+  {{
+    "reasoning": "ce que tu observes (hook, autonomie, arc, émotion, engagement) — AVANT les notes",
+    "scores": {{"hook_strength": 60, "context_autonomy": 55, "narrative_completeness": 50, "emotional_intensity": 45, "engagement_trigger": 40}},
+    "start_word_index": 12,
+    "end_word_index": 88,
+    "title": "titre accrocheur court",
+    "truncated_payoff": false
+  }}
 ]"""
 
     response = client.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}],
+        system=[{
+            "type": "text",
+            "text": CLIP_SCORING_SYSTEM,
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{"role": "user", "content": user_message}],
     )
 
     raw = response.content[0].text.strip()
@@ -444,20 +518,30 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme :
 
     valid_clips = []
     for c in llm_clips:
-        if not isinstance(c, dict) or "start" not in c or "end" not in c:
+        if not isinstance(c, dict):
             continue
         try:
-            snapped = _snap_to_words(float(c["start"]), float(c["end"]), words)
-        except (TypeError, ValueError):
+            si = int(c["start_word_index"])
+            ei = int(c["end_word_index"])
+        except (KeyError, TypeError, ValueError):
             continue
+        snapped = _snap_indices_to_words(si, ei, words)
         if not snapped:
             continue
         s, e = snapped
+        scores = c.get("scores") if isinstance(c.get("scores"), dict) else {}
+        # Flag truncated_payoff : la chute tombe hors du clip → on plafonne
+        # la complétude narrative (cf. validations obligatoires du prompt B).
+        if c.get("truncated_payoff"):
+            scores["narrative_completeness"] = min(
+                float(scores.get("narrative_completeness", 25)), 25
+            )
+        final = _final_score(scores) if scores else 60
         valid_clips.append({
             "start": s, "end": e,
             "title": c.get("title", "Extrait"),
-            "score": c.get("score", 70),
-            "reason": c.get("reason", ""),
+            "score": final,
+            "reason": c.get("reasoning", ""),
         })
 
     # Si l'IA n'a pas fourni assez de clips exploitables, on complète avec
