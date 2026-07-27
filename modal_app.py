@@ -108,15 +108,13 @@ SITE_URL = "https://opus-clip-alpha.vercel.app"
 STRIPE_PRODUCT_TO_PLAN = {
     "prod_UxMunMagkVFAZR": "pro",
     "prod_UxMtXHRHDGQljE": "equipe",
-    # À CRÉER par l'utilisateur dans Stripe : un produit d'abonnement récurrent
-    # à 9,99 €/mois pour le plan Starter, puis coller son product_id ci-dessous.
-    "prod_STARTER_A_CREER": "starter",
+    # Produit d'abonnement récurrent 9,99 €/mois pour le plan Starter.
+    "prod_UxgpL4tLubRJHB": "starter",
 }
 
-# Pack crédits : ACHAT UNIQUE (mode payment, PAS un abonnement).
-# À CRÉER par l'utilisateur dans Stripe : un Price "one-time" à 7,90 € (produit
-# « Pack crédits 60 min »), puis coller son price_id ci-dessous.
-STRIPE_CREDIT_PACK_PRICE_ID = "price_PACK_CREDITS_A_CREER"
+# Pack crédits : ACHAT UNIQUE (mode payment, PAS un abonnement). On stocke le
+# product_id ; le checkout lira son prix par défaut (Price « one-time » 7,90 €).
+STRIPE_CREDIT_PACK_PRODUCT_ID = "prod_Uxgt60DpLToZJw"
 
 # L'URL du projet et la clé anon sont PUBLIQUES par design (déjà exposées à
 # tous les visiteurs via supabase-config.js). On les met en dur ici, à
@@ -1402,14 +1400,22 @@ def billing():
 
             # --- Achat unique du pack crédits (mode payment) ---
             if plan == "credit_pack" or payload.get("creditPack"):
-                if STRIPE_CREDIT_PACK_PRICE_ID.endswith("A_CREER"):
+                if STRIPE_CREDIT_PACK_PRODUCT_ID.endswith("A_CREER"):
                     return JSONResponse(
                         {"error": "Le pack crédits n'est pas encore configuré côté Stripe."},
                         status_code=500,
                     )
+                pack_product = stripe.Product.retrieve(
+                    STRIPE_CREDIT_PACK_PRODUCT_ID, expand=["default_price"]
+                )
+                if not pack_product.default_price:
+                    return JSONResponse(
+                        {"error": "Le produit pack crédits n'a pas de prix par défaut configuré."},
+                        status_code=500,
+                    )
                 session = stripe.checkout.Session.create(
                     mode="payment",
-                    line_items=[{"price": STRIPE_CREDIT_PACK_PRICE_ID, "quantity": 1}],
+                    line_items=[{"price": pack_product.default_price.id, "quantity": 1}],
                     customer_email=email,
                     client_reference_id=user_id,
                     metadata={"user_id": user_id, "kind": "credit_pack"},
