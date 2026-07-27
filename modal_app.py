@@ -220,14 +220,17 @@ def _base_ydl_opts() -> dict:
     }
 
 
-def _apply_evasion(opts: dict) -> dict:
+def _apply_evasion(opts: dict, allow_proxy: bool = False) -> dict:
     """Ajoute les contournements anti-détection YouTube si les secrets
     correspondants sont fournis :
       - YOUTUBE_COOKIES : cookies d'un compte connecté (format Netscape
         cookies.txt). yt-dlp s'authentifie alors comme un vrai utilisateur.
-      - YOUTUBE_PROXY : proxy (idéalement résidentiel) pour ne pas sortir
-        depuis une IP de datacenter Modal, que YouTube bloque massivement.
-        Format : http://user:pass@host:port
+        Appliqué à TOUS (aucun coût à l'usage).
+      - YOUTUBE_PROXY : proxy résidentiel pour ne pas sortir depuis une IP de
+        datacenter Modal, que YouTube bloque massivement. Format :
+        http://user:pass@host:port. RÉSERVÉ au plan Équipe (`allow_proxy`),
+        car c'est une ressource facturée à la bande passante — on ne la
+        consomme que pour les abonnés qui la paient.
     C'est la combinaison des deux qui contourne le plus fiablement le
     "Sign in to confirm you're not a bot"."""
     cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
@@ -246,9 +249,10 @@ def _apply_evasion(opts: dict) -> dict:
         Path(cookie_file).write_text(cookies, encoding="utf-8")
         opts["cookiefile"] = cookie_file
 
-    proxy = os.environ.get("YOUTUBE_PROXY", "").strip()
-    if proxy:
-        opts["proxy"] = proxy
+    if allow_proxy:
+        proxy = os.environ.get("YOUTUBE_PROXY", "").strip()
+        if proxy:
+            opts["proxy"] = proxy
 
     return opts
 
@@ -258,19 +262,19 @@ def _is_bot_block(error: Exception) -> bool:
     return any(s in msg for s in ("sign in to confirm", "not a bot", "captcha", "403"))
 
 
-def get_youtube_duration(url: str) -> float:
+def get_youtube_duration(url: str, allow_proxy: bool = False) -> float:
     import yt_dlp
 
-    opts = _apply_evasion(_base_ydl_opts())
+    opts = _apply_evasion(_base_ydl_opts(), allow_proxy=allow_proxy)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return info.get("duration") or 0
 
 
-def download_youtube(url: str, out_path: str):
+def download_youtube(url: str, out_path: str, allow_proxy: bool = False):
     import yt_dlp
 
-    opts = _apply_evasion(_base_ydl_opts())
+    opts = _apply_evasion(_base_ydl_opts(), allow_proxy=allow_proxy)
     opts.update({
         # Prend la MEILLEURE vidéo disponible (jusqu'à 4K si la source
         # l'offre) + le meilleur audio, au lieu de se limiter à un mp4
@@ -1125,6 +1129,10 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
     plan = get_user_plan(supabase, user_id)
     resolution = PLAN_MAX_RESOLUTION[plan]
     reservations = []
+    # Le proxy résidentiel (contournement fiable des blocages YouTube) est un
+    # avantage du plan Équipe : ressource facturée à la bande passante, on ne
+    # l'active que pour eux.
+    allow_proxy = plan == "equipe"
 
     supabase.table("clip_jobs").insert({
         "user_id": user_id, "source_path": source_path, "status": "processing",
@@ -1140,7 +1148,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                 # arrière-plan) et non dans l'endpoint HTTP, car yt-dlp peut
                 # mettre de longues secondes à répondre.
                 try:
-                    yt_duration = get_youtube_duration(youtube_url)
+                    yt_duration = get_youtube_duration(youtube_url, allow_proxy=allow_proxy)
                 except Exception as exc:
                     if _is_bot_block(exc):
                         raise RuntimeError(
@@ -1157,7 +1165,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                 if not skip_billing:
                     enforce_source_caps(plan, yt_duration)
 
-                download_youtube(youtube_url, local_video)
+                download_youtube(youtube_url, local_video, allow_proxy=allow_proxy)
             else:
                 video_bytes = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
                 Path(local_video).write_bytes(video_bytes)
