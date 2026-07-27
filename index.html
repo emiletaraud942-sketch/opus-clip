@@ -125,6 +125,20 @@
     uploadStatus.style.display = 'block';
   }
 
+  // Lit la durée (secondes) d'un fichier vidéo local via une balise <video>.
+  function readVideoDuration(file) {
+    return new Promise((resolve, reject) => {
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.onloadedmetadata = () => {
+        URL.revokeObjectURL(video.src);
+        resolve(Number.isFinite(video.duration) ? video.duration : null);
+      };
+      video.onerror = () => { URL.revokeObjectURL(video.src); reject(new Error('metadata')); };
+      video.src = URL.createObjectURL(file);
+    });
+  }
+
   let processingInFlight = false;
   const videoUploadInput = document.getElementById('video-upload');
   const youtubeSubmitBtn = document.getElementById('youtube-submit');
@@ -161,6 +175,11 @@
 
     document.getElementById('upload-filename').textContent = file.name;
 
+    // Durée lue côté client (indice pour le contrôle de quota synchrone : on
+    // refuse AVANT tout traitement si le solde de minutes est insuffisant).
+    // Le contrôle autoritaire est refait côté serveur (ffprobe).
+    const sourceDurationSeconds = await readVideoDuration(file).catch(() => null);
+
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) {
       showUploadStatus('Crée un compte gratuit pour importer ta vidéo.', '#fca5a5');
@@ -187,7 +206,7 @@
       setBusy(false);
       return;
     }
-    await startProcessing({ path, subtitleStyle: getSubtitleStyle() }, freshToken);
+    await startProcessing({ path, subtitleStyle: getSubtitleStyle(), sourceDurationSeconds }, freshToken);
   });
 
   youtubeSubmitBtn.addEventListener('click', async () => {
@@ -253,7 +272,18 @@
     const data = await res.json().catch(() => ({}));
 
     if (!res.ok) {
-      showUploadStatus(data.error ?? "Échec du lancement du traitement. Réessaie dans un instant.", '#fca5a5');
+      // Quota épuisé : on propose le PACK CRÉDITS avant l'upsell (conversion la
+      // moins coûteuse psychologiquement), puis un lien vers les tarifs.
+      if (data.proposePack || data.code === 'insufficient_minutes') {
+        uploadStatus.style.color = '#fca5a5';
+        uploadStatus.style.display = 'block';
+        uploadStatus.innerHTML =
+          (data.error ?? "Minutes insuffisantes pour cette vidéo.") +
+          ' <a href="tarifs.html#pack" style="color:#c4b5fd;text-decoration:underline;font-weight:700;">Recharger 60 min pour 7,90€</a>' +
+          ' · <a href="tarifs.html" style="color:#f9a8c9;text-decoration:underline;">voir les abonnements</a>';
+      } else {
+        showUploadStatus(data.error ?? "Échec du lancement du traitement. Réessaie dans un instant.", '#fca5a5');
+      }
       setBusy(false);
       return;
     }

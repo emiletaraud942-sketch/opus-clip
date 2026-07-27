@@ -23,12 +23,28 @@
       renderNav({});
     </script>
 
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:32px;flex-wrap:wrap;gap:12px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
       <div style="display:flex;align-items:center;gap:12px;">
         <h1 style="font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:700;margin:0;">Mes clips</h1>
         <span id="plan-badge" style="display:none;background:rgba(244,63,142,.15);color:#f9a8c9;font-size:11px;font-weight:700;padding:4px 10px;border-radius:9999px;"></span>
       </div>
       <a href="index.html" style="background:#f43f8e;color:#fff;font-weight:700;font-size:13px;padding:10px 20px;border-radius:9999px;">+ Importer une vidéo</a>
+    </div>
+
+    <!-- Compteur d'usage : minutes d'abonnement + crédits -->
+    <div id="usage-widget" style="display:none;background:#17171d;border:1px solid #2a2a35;border-radius:14px;padding:16px 20px;margin-bottom:32px;font-size:13px;color:#d1d5db;">
+      <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:center;">
+        <div>
+          <div style="color:#6b7280;font-size:12px;">Minutes d'abonnement</div>
+          <div id="sub-minutes" style="font-size:20px;font-weight:700;color:#fff;font-family:'Space Grotesk',sans-serif;">—</div>
+        </div>
+        <div id="credit-block" style="display:none;">
+          <div style="color:#6b7280;font-size:12px;">Crédits</div>
+          <div id="credit-minutes" style="font-size:20px;font-weight:700;color:#c4b5fd;font-family:'Space Grotesk',sans-serif;">—</div>
+          <div id="credit-expiry" style="font-size:11px;color:#6b7280;"></div>
+        </div>
+        <a href="tarifs.html" style="margin-left:auto;color:#f9a8c9;font-size:13px;text-decoration:underline;">Recharger / changer de plan</a>
+      </div>
     </div>
 
     <div id="not-logged" style="display:none;text-align:center;padding:60px 20px;color:#9ca3af;">
@@ -50,7 +66,9 @@
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  const PLAN_LABELS = { free: 'Gratuit', pro: 'Pro', equipe: 'Équipe' };
+  const PLAN_LABELS = { free: 'Gratuit', starter: 'Starter', pro: 'Pro', equipe: 'Équipe' };
+  // Doit rester aligné avec pricing_config.py (PLANS[...].minutes).
+  const PLAN_MINUTES = { free: 25, starter: 75, pro: 160, equipe: 450 };
 
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) {
@@ -58,12 +76,41 @@
   } else {
     const { data: profile } = await supabase
       .from('profiles')
-      .select('plan')
+      .select('plan, minutes_used')
       .eq('user_id', session.user.id)
       .maybeSingle();
+    const plan = profile?.plan || 'free';
     const planBadge = document.getElementById('plan-badge');
-    planBadge.textContent = `Plan ${PLAN_LABELS[profile?.plan] || PLAN_LABELS.free}`;
+    planBadge.textContent = `Plan ${PLAN_LABELS[plan] || PLAN_LABELS.free}`;
     planBadge.style.display = 'inline-block';
+
+    // Compteur d'usage : minutes d'abonnement restantes + crédits actifs.
+    try {
+      const subTotal = PLAN_MINUTES[plan] ?? PLAN_MINUTES.free;
+      const subRemaining = Math.max(0, subTotal - (Number(profile?.minutes_used) || 0));
+      document.getElementById('sub-minutes').textContent = `${Math.round(subRemaining)} / ${subTotal} min`;
+
+      const nowIso = new Date().toISOString();
+      const { data: packs } = await supabase
+        .from('credit_packs')
+        .select('minutes_remaining, expires_at')
+        .eq('user_id', session.user.id)
+        .gt('minutes_remaining', 0)
+        .gte('expires_at', nowIso)
+        .order('expires_at', { ascending: true });
+
+      if (packs && packs.length) {
+        const totalCredits = packs.reduce((s, p) => s + Number(p.minutes_remaining), 0);
+        document.getElementById('credit-minutes').textContent = `${Math.round(totalCredits)} min`;
+        const soonest = new Date(packs[0].expires_at).toLocaleDateString('fr-FR');
+        document.getElementById('credit-expiry').textContent = `expire le ${soonest}`;
+        document.getElementById('credit-block').style.display = 'block';
+      }
+      document.getElementById('usage-widget').style.display = 'block';
+    } catch (e) {
+      // Colonnes/table pas encore migrées : on masque le widget sans bloquer.
+      console.warn('Compteur d\'usage indisponible :', e);
+    }
 
     const { data: clips, error } = await supabase
       .from('clips')

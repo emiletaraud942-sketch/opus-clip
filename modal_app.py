@@ -108,7 +108,15 @@ SITE_URL = "https://opus-clip-alpha.vercel.app"
 STRIPE_PRODUCT_TO_PLAN = {
     "prod_UxMunMagkVFAZR": "pro",
     "prod_UxMtXHRHDGQljE": "equipe",
+    # À CRÉER par l'utilisateur dans Stripe : un produit d'abonnement récurrent
+    # à 9,99 €/mois pour le plan Starter, puis coller son product_id ci-dessous.
+    "prod_STARTER_A_CREER": "starter",
 }
+
+# Pack crédits : ACHAT UNIQUE (mode payment, PAS un abonnement).
+# À CRÉER par l'utilisateur dans Stripe : un Price "one-time" à 7,90 € (produit
+# « Pack crédits 60 min »), puis coller son price_id ci-dessous.
+STRIPE_CREDIT_PACK_PRICE_ID = "price_PACK_CREDITS_A_CREER"
 
 # L'URL du projet et la clé anon sont PUBLIQUES par design (déjà exposées à
 # tous les visiteurs via supabase-config.js). On les met en dur ici, à
@@ -1391,11 +1399,39 @@ def billing():
             user_id, email = auth_result
 
             plan = payload.get("plan")
+
+            # --- Achat unique du pack crédits (mode payment) ---
+            if plan == "credit_pack" or payload.get("creditPack"):
+                if STRIPE_CREDIT_PACK_PRICE_ID.endswith("A_CREER"):
+                    return JSONResponse(
+                        {"error": "Le pack crédits n'est pas encore configuré côté Stripe."},
+                        status_code=500,
+                    )
+                session = stripe.checkout.Session.create(
+                    mode="payment",
+                    line_items=[{"price": STRIPE_CREDIT_PACK_PRICE_ID, "quantity": 1}],
+                    customer_email=email,
+                    client_reference_id=user_id,
+                    metadata={"user_id": user_id, "kind": "credit_pack"},
+                    # On propage l'user_id sur le PaymentIntent pour le retrouver
+                    # au webhook et garantir l'idempotence du crédit.
+                    payment_intent_data={"metadata": {"user_id": user_id, "kind": "credit_pack"}},
+                    success_url=f"{SITE_URL}/tarifs.html?paiement=succes",
+                    cancel_url=f"{SITE_URL}/tarifs.html?paiement=annule",
+                )
+                return {"url": session.url}
+
+            # --- Abonnement récurrent (starter / pro / equipe) ---
             product_id = next(
                 (pid for pid, p in STRIPE_PRODUCT_TO_PLAN.items() if p == plan), None
             )
             if not product_id:
                 return JSONResponse({"error": "Plan invalide"}, status_code=400)
+            if product_id.endswith("A_CREER"):
+                return JSONResponse(
+                    {"error": f"Le plan « {plan} » n'est pas encore configuré côté Stripe."},
+                    status_code=500,
+                )
 
             product = stripe.Product.retrieve(product_id, expand=["default_price"])
             if not product.default_price:
@@ -1435,15 +1471,73 @@ def billing():
             print(f"[webhook] Signature invalide : {exc}")
             return JSONResponse({"error": "Signature invalide"}, status_code=400)
 
+        supabase = get_supabase_client()
+
+        # --- Idempotence : un même event Stripe ne doit être traité qu'une fois.
+        # Stripe peut renvoyer un event plusieurs fois (retries). On enregistre
+        # son id ; si l'insertion échoue (déjà présent), on ignore.
+        event_id = event.get("id")
+        if event_id:
+            try:
+                supabase.table("stripe_events").insert(
+                    {"id": event_id, "type": event.get("type")}
+                ).execute()
+            except Exception:
+                print(f"[webhook] Event {event_id} déjà traité — ignoré (doublon).")
+                return {"received": True, "duplicate": True}
+
         if event["type"] == "checkout.session.completed":
             session = event["data"]["object"]
             user_id = session.get("client_reference_id") or session.get("metadata", {}).get("user_id")
-            plan = session.get("metadata", {}).get("plan")
+            meta = session.get("metadata", {}) or {}
 
-            if user_id and plan in PLAN_MONTHLY_LIMITS:
-                supabase = get_supabase_client()
-                supabase.table("profiles").upsert({"user_id": user_id, "plan": plan}).execute()
+            if meta.get("kind") == "credit_pack" and user_id:
+                # Achat unique du pack crédits : on crédite un NOUVEAU lot, avec
+                # sa propre expiration (+90 j). Le payment_intent, unique, sert
+                # de garde-fou d'idempotence de crédit (contrainte SQL unique).
+                payment_intent_id = session.get("payment_intent")
+                expires_at = (_now() + timedelta(days=pricing.CREDIT_PACK["validity_days"])).isoformat()
+                try:
+                    supabase.table("credit_packs").insert({
+                        "user_id": user_id,
+                        "minutes_purchased": pricing.CREDIT_PACK["minutes"],
+                        "minutes_remaining": pricing.CREDIT_PACK["minutes"],
+                        "expires_at": expires_at,
+                        "stripe_payment_intent_id": payment_intent_id,
+                    }).execute()
+                    print(f"[webhook] Pack crédits crédité à {user_id} ({pricing.CREDIT_PACK['minutes']} min).")
+                except Exception as exc:
+                    # Doublon de payment_intent (contrainte unique) = déjà crédité.
+                    print(f"[webhook] Pack crédits déjà crédité pour {payment_intent_id} — ignoré : {exc}")
+
+            elif user_id and meta.get("plan") in pricing.PLANS:
+                plan = meta["plan"]
+                # Nouvel abonnement : on fixe le plan ET on repart d'un quota
+                # mensuel neuf.
+                supabase.table("profiles").upsert({
+                    "user_id": user_id, "plan": plan,
+                    "minutes_used": 0, "quota_period_start": _period_start_str(),
+                }).execute()
                 print(f"[webhook] Plan de {user_id} mis à jour vers '{plan}'.")
+
+        elif event["type"] == "invoice.paid":
+            # Renouvellement mensuel d'un abonnement : on remet à zéro le quota
+            # d'abonnement. Les crédits achetés ne sont JAMAIS réinitialisés.
+            invoice = event["data"]["object"]
+            user_id = (invoice.get("metadata", {}) or {}).get("user_id")
+            sub_id = invoice.get("subscription")
+            if not user_id and sub_id:
+                try:
+                    sub = stripe.Subscription.retrieve(sub_id)
+                    user_id = (sub.get("metadata", {}) or {}).get("user_id")
+                except Exception as exc:
+                    print(f"[webhook] invoice.paid : impossible de retrouver l'abonnement {sub_id} : {exc}")
+            if user_id:
+                supabase.table("profiles").upsert({
+                    "user_id": user_id, "minutes_used": 0,
+                    "quota_period_start": _period_start_str(),
+                }).execute()
+                print(f"[webhook] Quota mensuel de {user_id} réinitialisé (invoice.paid).")
 
         elif event["type"] in ("customer.subscription.deleted", "customer.subscription.updated"):
             subscription = event["data"]["object"]
@@ -1451,7 +1545,6 @@ def billing():
             status = subscription.get("status")
 
             if user_id and status in ("canceled", "unpaid", "incomplete_expired"):
-                supabase = get_supabase_client()
                 supabase.table("profiles").upsert({"user_id": user_id, "plan": "free"}).execute()
                 print(f"[webhook] Abonnement de {user_id} terminé — retour au plan 'free'.")
 
