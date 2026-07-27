@@ -91,6 +91,10 @@
             </select>
           </label>
         </div>
+        <label style="display:flex;align-items:flex-start;gap:8px;margin-top:14px;font-size:12px;color:#d1d5db;cursor:pointer;">
+          <input type="checkbox" id="preset-viral" style="margin-top:2px;accent-color:#f43f8e;" />
+          <span><strong>Style viral (punchy)</strong> — sous-titres gros, centrés, gras et animés mot par mot, et sélection orientée vers les moments à forte réaction (rires, punchlines, montée d'énergie). Idéal pour un rendu type clip qui cartonne.</span>
+        </label>
       </div>
 
       <div id="clips-results" style="display:none;margin-top:28px;">
@@ -204,6 +208,11 @@
     };
   }
 
+  // Preset créateur choisi pour CETTE génération (case à cocher « Style viral »).
+  function getPreset() {
+    return document.getElementById('preset-viral').checked ? 'viral' : undefined;
+  }
+
   videoUploadInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file || processingInFlight) return;
@@ -248,7 +257,7 @@
       return;
     }
     lastYoutubeUrl = null;   // la dernière soumission est un upload, pas un lien
-    await startProcessing({ path, subtitleStyle: getSubtitleStyle(), sourceDurationSeconds }, freshToken);
+    await startProcessing({ path, subtitleStyle: getSubtitleStyle(), sourceDurationSeconds, preset: getPreset() }, freshToken);
   });
 
   // Dernier lien YouTube soumis (null si la dernière soumission était un upload).
@@ -282,7 +291,7 @@
       setBusy(false);
       return;
     }
-    await startProcessing({ youtubeUrl: url, subtitleStyle: getSubtitleStyle() }, freshToken);
+    await startProcessing({ youtubeUrl: url, subtitleStyle: getSubtitleStyle(), preset: getPreset() }, freshToken);
   }
 
   youtubeSubmitBtn.addEventListener('click', () => runYoutube(youtubeUrlInput.value.trim()));

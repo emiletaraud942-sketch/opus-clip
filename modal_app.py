@@ -744,7 +744,7 @@ def _record_usage(usage_sink, model, response):
         pass
 
 
-def select_clips_with_llm(words: list, full_text: str, signals: dict | None = None, usage_sink: list | None = None) -> list:
+def select_clips_with_llm(words: list, full_text: str, signals: dict | None = None, usage_sink: list | None = None, extra_guidance: str = "") -> list:
     """Demande à Claude d'évaluer les meilleurs moments selon la rubrique à
     cinq critères (cf. PROMPTS-CLAUDE prompt B), en découpe par INDEX DE MOTS.
     Les signaux objectifs (rires, énergie, plans) guident la sélection et
@@ -762,7 +762,7 @@ def select_clips_with_llm(words: list, full_text: str, signals: dict | None = No
 
 {_indexed_transcript(words)}
 
-{_signals_summary(signals)}Sélectionne les {target} MEILLEURS moments (au maximum {MAX_CLIPS_PER_VIDEO}) qui feraient de bons clips autonomes. Il est valide d'en proposer moins si le reste est faible, mais vise {target}.
+{_signals_summary(signals)}{extra_guidance}Sélectionne les {target} MEILLEURS moments (au maximum {MAX_CLIPS_PER_VIDEO}) qui feraient de bons clips autonomes. Il est valide d'en proposer moins si le reste est faible, mais vise {target}.
 
 Pour chaque clip, la découpe est en INDEX DE MOTS (start_word_index / end_word_index) pris dans la transcription ci-dessus. La durée réelle du clip doit tenir entre {MIN_CLIP_SECONDS} et {MAX_CLIP_SECONDS} secondes.
 
@@ -991,6 +991,26 @@ DEFAULT_SUBTITLE_STYLE = {
     "textColor": "blanc",
     "position": "bas",
     "size": "moyen",
+    "bold": False,     # activé uniquement par un preset (non réglable librement)
+    "punchy": False,   # sous-titres mot par mot animés (preset viral)
+}
+
+# Presets « profil créateur » : appliqués À LA DEMANDE sur une génération
+# (case à cocher côté site). Ils biaisent la SÉLECTION (moments à forte
+# réaction, hooks courts) et le RENDU des sous-titres (gros, centrés, gras,
+# animés mot par mot). C'est le creator_preset de la spec, en version simple.
+CREATOR_PRESETS = {
+    "viral": {
+        "style": {"size": "grand", "position": "milieu", "bold": True, "punchy": True},
+        "selection_guidance": (
+            "PROFIL VIRAL demandé : privilégie AU MAXIMUM les moments à forte réaction "
+            "— éclats de rire, punchlines, montée d'énergie, réactions vives, "
+            "retournements de situation. Écarte les passages explicatifs, calmes ou "
+            "informatifs. Choisis des hooks TRÈS courts : le clip doit accrocher dès la "
+            "première seconde, quitte à entrer en plein milieu de l'action. Coupe pile "
+            "sur le mot fort, jamais après. Préfère des clips courts et percutants."
+        ),
+    },
 }
 
 
@@ -999,12 +1019,14 @@ def _hex_to_ass_color(hex_rgb: str) -> str:
     return f"&H00{b}{g}{r}&"
 
 
-def resolve_subtitle_style(raw_style: dict | None) -> dict:
+def resolve_subtitle_style(raw_style: dict | None, preset: str | None = None) -> dict:
     """Valide et complète le style de sous-titres choisi par l'utilisateur
-    avec les valeurs par défaut, en rejetant toute valeur hors whitelist."""
+    avec les valeurs par défaut, en rejetant toute valeur hors whitelist. Si un
+    preset créateur est fourni, ses réglages sont appliqués PAR-DESSUS (bold,
+    punchy, etc. ne sont réglables que via un preset, pas librement)."""
     raw_style = raw_style or {}
     style = dict(DEFAULT_SUBTITLE_STYLE)
-    for key in style:
+    for key in ("textColor", "position", "size"):
         value = raw_style.get(key)
         if key == "textColor" and value in SUBTITLE_COLOR_PRESETS:
             style[key] = value
@@ -1012,6 +1034,8 @@ def resolve_subtitle_style(raw_style: dict | None) -> dict:
             style[key] = value
         elif key == "size" and value in SUBTITLE_SIZE_PRESETS:
             style[key] = value
+    if preset and preset in CREATOR_PRESETS:
+        style.update(CREATOR_PRESETS[preset]["style"])
     return style
 
 
@@ -1019,6 +1043,11 @@ def build_ass_header(style: dict) -> str:
     text_color = _hex_to_ass_color(SUBTITLE_COLOR_PRESETS[style["textColor"]])
     font_size = SUBTITLE_SIZE_PRESETS[style["size"]]
     alignment = SUBTITLE_POSITION_PRESETS[style["position"]]
+    bold = 1 if style.get("bold") else 0
+    # En mode punchy : contour plus épais + ombre portée pour un rendu qui
+    # ressort bien sur n'importe quel fond (style « clip viral »).
+    outline = 5 if style.get("punchy") else 3
+    shadow = 2 if style.get("punchy") else 0
     return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -1026,7 +1055,7 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,{font_size},{text_color},&H00000000,&H00000000,0,3,3,0,{alignment},20,20,80,1
+Style: Default,Arial,{font_size},{text_color},&H00000000,&H80000000,{bold},1,{outline},{shadow},{alignment},20,20,80,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1035,9 +1064,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 def write_subtitles(words: list, segments: list, path: str, style: dict):
     """Génère un fichier de sous-titres .ass, avec les horodatages remappés
-    sur le montage compressé (silences retirés). TOUS les mots ont la même
-    couleur (celle choisie par l'utilisateur) — aucune mise en emphase par
-    mot, pour un rendu uniforme."""
+    sur le montage compressé (silences retirés). Couleur uniforme (celle
+    choisie), aucune emphase par mot. En mode « punchy » (preset viral), on
+    affiche 1-2 mots à la fois avec un léger fondu d'apparition — le rendu
+    « mot par mot animé » des clips viraux."""
+    punchy = bool(style.get("punchy"))
+    group_size = 2 if punchy else 6
+    fade = r"{\fad(80,0)}" if punchy else ""
+
     lines = [build_ass_header(style)]
     chunk = []
 
@@ -1047,11 +1081,11 @@ def write_subtitles(words: list, segments: list, path: str, style: dict):
         start = remap_time(chunk[0]["start"], segments)
         end = remap_time(chunk[-1]["end"], segments)
         text = " ".join(w["word"] for w in chunk)
-        lines.append(f"Dialogue: 0,{fmt_ass_time(start)},{fmt_ass_time(end)},Default,,0,0,0,,{text}")
+        lines.append(f"Dialogue: 0,{fmt_ass_time(start)},{fmt_ass_time(end)},Default,,0,0,0,,{fade}{text}")
 
     for w in words:
         chunk.append(w)
-        if len(chunk) >= 6:
+        if len(chunk) >= group_size:
             flush()
             chunk = []
     flush()
@@ -1123,8 +1157,8 @@ def render_clip(source_path: str, clip: dict, words: list, style: dict, resoluti
 
 
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=2400)
-def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False):
-    style = resolve_subtitle_style(subtitle_style)
+def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False, preset: str | None = None):
+    style = resolve_subtitle_style(subtitle_style, preset=preset)
     supabase = get_supabase_client()
     plan = get_user_plan(supabase, user_id)
     resolution = PLAN_MAX_RESOLUTION[plan]
@@ -1202,7 +1236,13 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             # N'échoue jamais le pipeline (renvoie des listes vides sinon).
             signals = extract_signals(local_video)
             usage_sink = []   # journal des tokens LLM pour la télémétrie de coût
-            clips = select_clips_with_llm(words, full_text, signals=signals, usage_sink=usage_sink)
+            preset_guidance = ""
+            if preset and preset in CREATOR_PRESETS:
+                preset_guidance = CREATOR_PRESETS[preset]["selection_guidance"] + "\n\n"
+            clips = select_clips_with_llm(
+                words, full_text, signals=signals, usage_sink=usage_sink,
+                extra_guidance=preset_guidance,
+            )
 
             rows = []
             for i, clip in enumerate(clips):
@@ -1385,6 +1425,11 @@ def process():
                         }, status_code=403)
 
             subtitle_style = resolve_subtitle_style(payload.get("subtitleStyle"))
+            # Preset créateur optionnel, activé par génération (case à cocher).
+            # Whitelisté : on n'accepte que des presets connus.
+            preset = payload.get("preset")
+            if preset not in CREATOR_PRESETS:
+                preset = None
 
             youtube_url = payload.get("youtubeUrl")
             if youtube_url:
@@ -1392,14 +1437,14 @@ def process():
                 # contrôle (plafond + solde) est fait dans process_video avant
                 # tout traitement coûteux.
                 source_path = f"{user_id}/youtube_{int(time.time())}"
-                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style, skip_billing=skip_billing)
+                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset)
                 return {"status": "processing_started", "sourcePath": source_path}
 
             source_path = payload["path"]
             if not source_path.startswith(f"{user_id}/"):
                 return JSONResponse({"error": "Chemin invalide"}, status_code=403)
 
-            process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style, skip_billing=skip_billing)
+            process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset)
             return {"status": "processing_started", "sourcePath": source_path}
         except Exception as exc:
             print(f"[handle] Erreur non gérée : {exc}")
