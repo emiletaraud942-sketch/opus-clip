@@ -117,8 +117,39 @@ CREDIT_PACK = {
 }
 
 
+# --- Coûts réels observés (télémétrie Phase 3) ---
+# Sert à VALIDER ou invalider COST_PER_SOURCE_MINUTE_EUR : on enregistre le coût
+# réel de chaque traitement dans la table processing_costs, puis on compare.
+USD_TO_EUR = 0.92
+
+# Tarifs LLM par million de tokens (entrée, sortie), en USD.
+LLM_PRICES_USD = {
+    "claude-sonnet-4-5": (3.0, 15.0),
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
+}
+
+# Transcription AssemblyAI : estimation par minute d'audio (USD). À ajuster
+# selon ton offre réelle une fois la télémétrie observée.
+ASSEMBLYAI_USD_PER_MINUTE = 0.0062
+
+
+def llm_cost_eur(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Coût réel d'un appel LLM en euros, d'après les tokens facturés."""
+    p_in, p_out = LLM_PRICES_USD.get(model, (3.0, 15.0))
+    usd = (input_tokens / 1_000_000) * p_in + (output_tokens / 1_000_000) * p_out
+    return usd * USD_TO_EUR
+
+
+def transcription_cost_eur(source_seconds: float) -> float:
+    return (source_seconds / 60.0) * ASSEMBLYAI_USD_PER_MINUTE * USD_TO_EUR
+
+
 def plan_minutes(plan: str) -> int:
     return PLANS.get(plan, PLANS["free"])["minutes"]
+
+
+def plan_retention_hours(plan: str) -> int:
+    return PLANS.get(plan, PLANS["free"])["retention_hours"]
 
 
 def plan_max_video_seconds(plan: str) -> int:

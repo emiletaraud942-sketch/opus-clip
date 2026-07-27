@@ -129,6 +129,18 @@
         { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]
       ));
 
+      // Compte à rebours d'expiration (plan gratuit : clips supprimés à 72 h).
+      function expiryBadge(createdAt) {
+        if (plan !== 'free') return '';
+        const expires = new Date(createdAt).getTime() + 72 * 3600 * 1000;
+        const hoursLeft = Math.floor((expires - Date.now()) / 3600000);
+        if (hoursLeft <= 0) {
+          return `<div style="margin-top:8px;font-size:11px;color:#fca5a5;">⏳ Supprimé très bientôt — passe à un plan payant pour conserver tes clips</div>`;
+        }
+        const color = hoursLeft <= 12 ? '#fca5a5' : '#9ca3af';
+        return `<div style="margin-top:8px;font-size:11px;color:${color};">⏳ Expire dans ${hoursLeft} h (plan gratuit : clips gardés 72 h)</div>`;
+      }
+
       const grid = document.getElementById('clips-grid');
       grid.innerHTML = rows.map(c => {
         const tags = Array.isArray(c.hashtags) ? c.hashtags : [];
@@ -151,6 +163,7 @@
             </div>
             <div style="font-size:12px;color:#6b7280;">${new Date(c.created_at).toLocaleDateString('fr-FR')} · ${Math.round(c.end_time - c.start_time)}s</div>
           </a>
+          ${expiryBadge(c.created_at)}
           ${captionBlock}
         </div>`;
       }).join('');

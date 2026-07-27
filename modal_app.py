@@ -726,7 +726,21 @@ SIGNAL_BONUS_ENERGY = 3
 SIGNAL_BONUS_MAX = 15
 
 
-def select_clips_with_llm(words: list, full_text: str, signals: dict | None = None) -> list:
+def _record_usage(usage_sink, model, response):
+    """Ajoute les tokens facturés d'un appel au journal de coût (si fourni)."""
+    if usage_sink is None:
+        return
+    try:
+        usage_sink.append({
+            "model": model,
+            "input": getattr(response.usage, "input_tokens", 0) or 0,
+            "output": getattr(response.usage, "output_tokens", 0) or 0,
+        })
+    except Exception:
+        pass
+
+
+def select_clips_with_llm(words: list, full_text: str, signals: dict | None = None, usage_sink: list | None = None) -> list:
     """Demande à Claude d'évaluer les meilleurs moments selon la rubrique à
     cinq critères (cf. PROMPTS-CLAUDE prompt B), en découpe par INDEX DE MOTS.
     Les signaux objectifs (rires, énergie, plans) guident la sélection et
@@ -770,6 +784,7 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme exac
         }],
         messages=[{"role": "user", "content": user_message}],
     )
+    _record_usage(usage_sink, "claude-sonnet-4-5", response)
 
     raw = response.content[0].text.strip()
     start_idx = raw.find("[")
@@ -855,7 +870,7 @@ Ce qui fonctionne : une question directe qui appelle un avis ; une affirmation l
 Règles : français naturel, parlé, tutoiement. Maximum 150 caractères, l'essentiel dans les 40 premiers. Un emoji maximum, seulement s'il ajoute quelque chose."""
 
 
-def generate_tiktok_copy(clip_transcript: str) -> dict:
+def generate_tiktok_copy(clip_transcript: str, usage_sink: list | None = None) -> dict:
     """Génère une légende TikTok + hashtags pour un clip (prompt D). Renvoie
     {"caption": str, "hashtags": [str]}. Ne fait jamais échouer le montage :
     en cas d'erreur, renvoie des valeurs vides."""
@@ -882,6 +897,7 @@ def generate_tiktok_copy(clip_transcript: str) -> dict:
                 "(3 à 5 hashtags sans le #)."
             )}],
         )
+        _record_usage(usage_sink, "claude-haiku-4-5-20251001", response)
         raw = response.content[0].text.strip()
         s, e = raw.find("{"), raw.rfind("}")
         if s == -1 or e == -1:
@@ -1177,7 +1193,8 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             # Signaux objectifs (CPU) : rires, énergie, plans, visage.
             # N'échoue jamais le pipeline (renvoie des listes vides sinon).
             signals = extract_signals(local_video)
-            clips = select_clips_with_llm(words, full_text, signals=signals)
+            usage_sink = []   # journal des tokens LLM pour la télémétrie de coût
+            clips = select_clips_with_llm(words, full_text, signals=signals, usage_sink=usage_sink)
 
             rows = []
             for i, clip in enumerate(clips):
@@ -1196,7 +1213,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     clip_text = " ".join(
                         w["word"] for w in words_in_range(words, clip["start"], clip["end"])
                     )
-                    copy = generate_tiktok_copy(clip_text)
+                    copy = generate_tiktok_copy(clip_text, usage_sink=usage_sink)
 
                     rows.append({
                         "user_id": user_id,
@@ -1244,6 +1261,27 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
         # Succès : on valide définitivement les minutes réservées.
         if reservations:
             commit_reservations(supabase, reservations, source_seconds=duration)
+
+        # Télémétrie de coût RÉEL (Phase 3) : sert à valider ou invalider
+        # COST_PER_SOURCE_MINUTE_EUR. N'échoue jamais le traitement.
+        try:
+            cost_llm = sum(
+                pricing.llm_cost_eur(u["model"], u["input"], u["output"])
+                for u in usage_sink
+            )
+            cost_transcription = pricing.transcription_cost_eur(duration)
+            cost_total = cost_llm + cost_transcription
+            supabase.table("processing_costs").insert({
+                "user_id": user_id,
+                "source_id": source_path,
+                "plan": plan,
+                "source_duration_s": duration,
+                "cost_llm_eur": round(cost_llm, 5),
+                "cost_transcription_eur": round(cost_transcription, 5),
+                "cost_total_eur": round(cost_total, 5),
+            }).execute()
+        except Exception as tel_exc:
+            print(f"[process_video] télémétrie de coût ignorée : {tel_exc}")
 
         supabase.table("clip_jobs").update({"status": "done"}).eq("source_path", source_path).eq("user_id", user_id).execute()
     except Exception as exc:
@@ -1557,3 +1595,44 @@ def billing():
         return {"received": True}
 
     return web_app
+
+
+@app.function(
+    image=image,
+    secrets=[modal.Secret.from_name("sortclip-secrets")],
+    schedule=modal.Cron("0 * * * *"),   # toutes les heures
+)
+def cleanup_free_clips():
+    """Supprime les clips des comptes GRATUITS de plus de 72 h (rétention du
+    plan free), du bucket de stockage et de la table. L'avertissement se fait
+    en amont, in-app, via le compte à rebours affiché sur chaque clip."""
+    supabase = get_supabase_client()
+    retention_h = pricing.plan_retention_hours("free")
+    cutoff = (_now() - timedelta(hours=retention_h)).isoformat()
+
+    free = supabase.table("profiles").select("user_id").eq("plan", "free").execute().data or []
+    free_ids = [r["user_id"] for r in free]
+    if not free_ids:
+        return
+
+    # On traite par lots pour rester léger (comptes gratuits potentiellement nombreux).
+    total = 0
+    for i in range(0, len(free_ids), 100):
+        batch = free_ids[i:i + 100]
+        old = (
+            supabase.table("clips").select("id,storage_path")
+            .in_("user_id", batch).lt("created_at", cutoff).execute().data or []
+        )
+        if not old:
+            continue
+        paths = [c["storage_path"] for c in old if c.get("storage_path")]
+        if paths:
+            try:
+                supabase.storage.from_(CLIPS_BUCKET).remove(paths)
+            except Exception as exc:
+                print(f"[cleanup] échec suppression stockage (on continue) : {exc}")
+        supabase.table("clips").delete().in_("id", [c["id"] for c in old]).execute()
+        total += len(old)
+
+    if total:
+        print(f"[cleanup] {total} clip(s) gratuit(s) de plus de {retention_h} h supprimé(s).")
