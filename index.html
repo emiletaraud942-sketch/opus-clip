@@ -114,6 +114,44 @@
   </div>
 </section>
 
+<!-- Exemples de rendu (ILLUSTRATIONS — pas des résultats réels) -->
+<section style="width:100%;background:#0f0f14;font-family:'Inter',sans-serif;color:#fff;padding:8px 32px 64px;box-sizing:border-box;">
+  <div style="max-width:1240px;margin:0 auto;">
+    <div style="text-align:center;margin-bottom:8px;">
+      <h2 style="font-family:'Space Grotesk',sans-serif;font-size:26px;font-weight:700;margin:0 0 8px;">À quoi ressemble un clip Sortclip</h2>
+      <p style="font-size:13px;color:#6b7280;margin:0;">Illustrations du format vertical généré — rendus indicatifs, pas des résultats réels.</p>
+    </div>
+    <div id="examples-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px;margin-top:28px;"></div>
+  </div>
+  <script>
+    // Vignettes illustratives : légende + score + nombre de vues présenté
+    // comme OBJECTIF INDICATIF (aucune vidéo réelle, aucune donnée de tiers).
+    (function () {
+      const examples = [
+        { caption: "« J'ai jamais vu ça de ma vie »", score: 94, views: "2,1 M", hue: 320 },
+        { caption: "Le moment où tout dérape",         score: 89, views: "870 k", hue: 265 },
+        { caption: "Sa réaction est incroyable",       score: 91, views: "1,4 M", hue: 190 },
+        { caption: "Personne ne s'y attendait",        score: 87, views: "640 k", hue: 145 },
+        { caption: "La punchline qui tue",             score: 96, views: "3,2 M", hue: 25  },
+        { caption: "Il fallait pas dire ça",           score: 88, views: "760 k", hue: 350 },
+      ];
+      const esc = (s) => String(s).replace(/[&<>"]/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[m]));
+      document.getElementById('examples-grid').innerHTML = examples.map(e => `
+        <div style="position:relative;aspect-ratio:9/16;border-radius:16px;overflow:hidden;border:1px solid #2a2a35;
+          background:linear-gradient(150deg,hsl(${e.hue} 45% 22%),hsl(${(e.hue+40)%360} 40% 12%));">
+          <div style="position:absolute;top:10px;left:10px;background:#f43f8e;font-size:11px;font-weight:800;padding:4px 9px;border-radius:9999px;">${e.score} · viral</div>
+          <div style="position:absolute;top:10px;right:10px;background:rgba(0,0,0,.45);color:#e5e7eb;font-size:10px;font-weight:700;padding:4px 8px;border-radius:9999px;">Illustration</div>
+          <div style="position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:16px;">▶</div>
+          <div style="position:absolute;bottom:0;left:0;right:0;padding:12px;background:linear-gradient(transparent,rgba(0,0,0,.85));">
+            <div style="font-size:12px;font-weight:700;line-height:1.35;margin-bottom:6px;">${esc(e.caption)}</div>
+            <div style="font-size:11px;color:#d1d5db;">👁 ${esc(e.views)} vues <span style="color:#6b7280;">(objectif indicatif)</span></div>
+          </div>
+        </div>
+      `).join('');
+    })();
+  </script>
+</section>
+
 <script type="module">
   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   import { SUPABASE_URL, SUPABASE_ANON_KEY } from './supabase-config.js';
