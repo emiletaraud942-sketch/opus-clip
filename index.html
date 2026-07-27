@@ -102,18 +102,10 @@
         <div id="clips-list" style="display:flex;flex-direction:column;gap:10px;"></div>
       </div>
     </div>
-    <div style="position:relative;width:280px;height:500px;flex-shrink:0;">
-      <div style="position:absolute;inset:24px 8px 0 8px;background:#1a1a22;border-radius:20px;transform:rotate(4deg);"></div>
-      <div style="position:absolute;inset:12px 4px 0 4px;background:#20202a;border-radius:20px;transform:rotate(-2deg);"></div>
-      <div style="position:absolute;inset:0;background:#17171d;border:1px solid #2a2a35;border-radius:20px;overflow:hidden;box-shadow:0 30px 60px rgba(0,0,0,.5);">
-        <div style="position:absolute;inset:0;background:#1f1f28;display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:13px;">Exemple de clip généré par l'IA</div>
-        <div style="position:absolute;top:14px;left:14px;background:#f43f8e;font-size:12px;font-weight:800;padding:5px 12px;border-radius:9999px;">92 · score viral</div>
-        <div style="position:absolute;bottom:0;left:0;right:0;padding:20px;background:linear-gradient(transparent,rgba(0,0,0,.85));">
-          <div style="font-size:14px;font-weight:700;margin-bottom:6px;">"C'est là que tout a basculé"</div>
-          <div style="font-size:12px;color:#d1d5db;">00:14 — sous-titres générés · recadrage 9:16</div>
-        </div>
-      </div>
-      <div style="position:absolute;top:-16px;right:-16px;background:#17171d;border:1px solid #2a2a35;color:#9ca3af;font-size:11px;font-weight:600;padding:5px 12px;border-radius:9999px;">Exemple</div>
+    <div style="width:340px;flex-shrink:0;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:10px;color:#d1d5db;">Des clips réels générés par Sortclip</div>
+      <div id="hero-clips-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;"></div>
+      <div style="font-size:10px;color:#6b7280;margin-top:8px;">Clips réels générés par l'outil · vues à titre indicatif.</div>
     </div>
   </div>
 </section>
@@ -123,24 +115,37 @@
   <div style="max-width:1240px;margin:0 auto;">
     <div style="text-align:center;margin-bottom:8px;">
       <h2 style="font-family:'Space Grotesk',sans-serif;font-size:26px;font-weight:700;margin:0 0 8px;">Des clips réels générés par Sortclip</h2>
-      <p style="font-size:13px;color:#6b7280;margin:0;">Extraits automatiquement d'une vidéo longue — sous-titres et cadrage vertical inclus.</p>
+      <p style="font-size:13px;color:#6b7280;margin:0;">Extraits automatiquement d'une vidéo longue — sous-titres et cadrage vertical inclus. Vues à titre indicatif.</p>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:18px;margin-top:28px;">
-      <div style="border-radius:16px;overflow:hidden;border:1px solid #2a2a35;background:#000;">
-        <video src="examples/clip1.mp4" controls preload="metadata" playsinline style="display:block;width:100%;aspect-ratio:9/16;object-fit:cover;background:#000;"></video>
-      </div>
-      <div style="border-radius:16px;overflow:hidden;border:1px solid #2a2a35;background:#000;">
-        <video src="examples/clip2.mp4" controls preload="metadata" playsinline style="display:block;width:100%;aspect-ratio:9/16;object-fit:cover;background:#000;"></video>
-      </div>
-      <div style="border-radius:16px;overflow:hidden;border:1px solid #2a2a35;background:#000;">
-        <video src="examples/clip3.mp4" controls preload="metadata" playsinline style="display:block;width:100%;aspect-ratio:9/16;object-fit:cover;background:#000;"></video>
-      </div>
-      <div style="border-radius:16px;overflow:hidden;border:1px solid #2a2a35;background:#000;">
-        <video src="examples/clip4.mp4" controls preload="metadata" playsinline style="display:block;width:100%;aspect-ratio:9/16;object-fit:cover;background:#000;"></video>
-      </div>
-    </div>
+    <div id="examples-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px;margin-top:28px;"></div>
   </div>
 </section>
+
+<script>
+  // Rendu des clips d'exemple (mêmes cartes dans le hero et en bas de page).
+  (function () {
+    const clips = [
+      { src: 'examples/clip1.mp4', title: "On peut mourir ? Ça m'intéresse pas sinon", views: '512 k' },
+      { src: 'examples/clip2.mp4', title: "Panique intérieure, tout lâche en même temps", views: '340 k' },
+      { src: 'examples/clip3.mp4', title: "Panique totale, l'eau rentre dans la maison", views: '890 k' },
+      { src: 'examples/clip4.mp4', title: "Le tremblement de terre me fait le plus peur", views: '128 k' },
+    ];
+    const esc = (s) => String(s).replace(/[&<>"]/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[m]));
+    const card = (c) => `
+      <div style="border:1px solid #3a3a48;border-radius:14px;overflow:hidden;background:#141019;box-shadow:0 8px 24px rgba(0,0,0,.4);">
+        <video src="${esc(c.src)}" controls preload="metadata" playsinline style="display:block;width:100%;aspect-ratio:9/16;object-fit:cover;background:#000;"></video>
+        <div style="padding:9px 11px;">
+          <div style="font-size:11px;font-weight:700;line-height:1.35;color:#fff;min-height:30px;">${esc(c.title)}</div>
+          <div style="font-size:12px;color:#f9a8c9;font-weight:800;margin-top:5px;">👁 ${esc(c.views)} vues</div>
+        </div>
+      </div>`;
+    const html = clips.map(card).join('');
+    ['hero-clips-grid', 'examples-grid'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = html;
+    });
+  })();
+</script>
 
 <script type="module">
   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';

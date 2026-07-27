@@ -15,13 +15,29 @@ function sb() {
 // rendu ET à chaque changement d'auth, pour que TOUTES les pages affichent
 // l'état « connecté » de façon cohérente (le bug « je clique sur un onglet et
 // ça me déconnecte » venait du fait que la nav restait figée sur Connexion).
+const PLAN_LABELS = { free: 'Gratuit', starter: 'Starter', pro: 'Pro', equipe: 'Équipe' };
+const escHtml = (s) => String(s ?? '').replace(/[&<>"]/g, m => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]
+));
+
 async function refreshNavAuth() {
   const area = document.getElementById('auth-area');
   if (!area) return;
   const { data: { session } } = await sb().auth.getSession();
   if (session) {
+    // Nom d'utilisateur + badge d'abonnement, affichés en haut à droite de
+    // TOUTES les pages (comme avant, mais désormais centralisé ici).
+    let plan = 'free';
+    try {
+      const { data: profile } = await sb()
+        .from('profiles').select('plan').eq('user_id', session.user.id).maybeSingle();
+      if (profile?.plan) plan = profile.plan;
+    } catch (_) { /* profil pas encore créé : on garde 'free' */ }
+    const name = session.user.user_metadata?.full_name || session.user.email || '';
     area.innerHTML =
       '<a href="mes-clips.html" class="nav-link">Mes clips</a>' +
+      `<span style="background:rgba(244,63,142,.15);color:#f9a8c9;font-size:11px;font-weight:700;padding:4px 10px;border-radius:9999px;white-space:nowrap;">Plan ${escHtml(PLAN_LABELS[plan] || PLAN_LABELS.free)}</span>` +
+      `<span style="color:#d1d5db;font-size:13px;">${escHtml(name)}</span>` +
       '<a id="nav-logout" href="#" class="nav-link">Déconnexion</a>';
     const btn = document.getElementById('nav-logout');
     if (btn) btn.addEventListener('click', async (e) => {
