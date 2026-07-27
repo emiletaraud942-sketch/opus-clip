@@ -58,6 +58,9 @@
       </div>
       <div style="font-size:11px;color:#6b7280;line-height:1.6;">Réservé aux vidéos dont vous êtes propriétaire ou titulaire des droits (ex. votre propre podcast). Voir nos <a href="cgu.html" style="color:#9ca3af;text-decoration:underline;">Conditions d'utilisation</a>.</div>
 
+      <!-- Message spécifique au blocage anti-robot YouTube -->
+      <div id="youtube-error" style="display:none;margin-top:12px;background:rgba(244,63,94,.08);border:1px solid rgba(244,63,94,.35);border-radius:12px;padding:12px 14px;font-size:12px;color:#fca5a5;line-height:1.6;"></div>
+
       <div style="background:#17171d;border:1px solid #2a2a35;border-radius:16px;padding:16px 18px;margin-top:16px;">
         <div style="font-size:13px;font-weight:700;margin-bottom:12px;">Personnaliser les sous-titres</div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;">
@@ -206,12 +209,24 @@
       setBusy(false);
       return;
     }
+    lastYoutubeUrl = null;   // la dernière soumission est un upload, pas un lien
     await startProcessing({ path, subtitleStyle: getSubtitleStyle(), sourceDurationSeconds }, freshToken);
   });
 
-  youtubeSubmitBtn.addEventListener('click', async () => {
-    const url = youtubeUrlInput.value.trim();
+  // Dernier lien YouTube soumis (null si la dernière soumission était un upload).
+  // Permet d'afficher un message dédié + un bouton « Réessayer » en cas de
+  // blocage anti-robot YouTube.
+  let lastYoutubeUrl = null;
+  const youtubeError = document.getElementById('youtube-error');
+
+  function hideYoutubeError() {
+    youtubeError.style.display = 'none';
+    youtubeError.innerHTML = '';
+  }
+
+  async function runYoutube(url) {
     if (!url || processingInFlight) return;
+    hideYoutubeError();
 
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) {
@@ -220,6 +235,7 @@
       return;
     }
 
+    lastYoutubeUrl = url;
     setBusy(true);
     showUploadStatus('Lancement du traitement IA...', '#9ca3af');
     const freshToken = await getFreshAccessToken();
@@ -229,7 +245,9 @@
       return;
     }
     await startProcessing({ youtubeUrl: url, subtitleStyle: getSubtitleStyle() }, freshToken);
-  });
+  }
+
+  youtubeSubmitBtn.addEventListener('click', () => runYoutube(youtubeUrlInput.value.trim()));
 
   // Force un rafraîchissement du token juste avant l'appel à Modal, pour
   // éviter d'envoyer un token périmé si le rafraîchissement automatique
@@ -319,6 +337,23 @@
         clearInterval(interval);
         setBusy(false);
         console.error('Erreur de traitement:', job.error);
+
+        // Cas particulier : blocage anti-robot YouTube → message dédié SOUS le
+        // champ du lien, avec invitation à réessayer et alternative fiable.
+        const err = job.error || '';
+        const isBotBlock = /anti-robot|bloqué le téléchargement/i.test(err);
+        if (isBotBlock && lastYoutubeUrl) {
+          uploadStatus.style.display = 'none';
+          youtubeError.style.display = 'block';
+          youtubeError.innerHTML =
+            "YouTube a temporairement bloqué le téléchargement de cette vidéo (protection anti-robot). " +
+            "Ce blocage est souvent passager — tu peux réessayer dans un instant. " +
+            "S'il persiste, importe directement le fichier vidéo depuis ton ordinateur (méthode la plus fiable, jamais bloquée)." +
+            '<div style="margin-top:10px;"><button id="youtube-retry" style="background:#f43f8e;color:#fff;border:0;font-weight:700;font-size:12px;padding:8px 16px;border-radius:9999px;cursor:pointer;">Réessayer</button></div>';
+          document.getElementById('youtube-retry').addEventListener('click', () => runYoutube(lastYoutubeUrl));
+          return;
+        }
+
         showUploadStatus("Une erreur est survenue pendant le traitement. Réessaie ou contacte le support si ça persiste.", '#fca5a5');
         return;
       }
