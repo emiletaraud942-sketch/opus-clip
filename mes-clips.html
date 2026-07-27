@@ -120,14 +120,22 @@
     if (error || !clips || clips.length === 0) {
       document.getElementById('empty-state').style.display = 'block';
     } else {
-      const rows = await Promise.all(clips.map(async (c) => {
-        const { data } = await supabase.storage.from('clips').createSignedUrl(c.storage_path, 3600);
-        return { ...c, url: data?.signedUrl };
-      }));
+      const rows = clips;
 
       const esc = (s) => String(s ?? '').replace(/[&<>"]/g, m => (
         { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]
       ));
+
+      const safeName = (t) => (String(t || 'clip').replace(/[^\w-]+/g, '_').slice(0, 40) || 'clip') + '.mp4';
+
+      // Génère un lien signé FRAIS au moment du clic (les liens signés
+      // expirent : les pré-générer au chargement provoque des « InvalidJWT ».
+      async function freshUrl(path, downloadName) {
+        const opts = downloadName ? { download: downloadName } : undefined;
+        const { data, error } = await supabase.storage.from('clips').createSignedUrl(path, 120, opts);
+        if (error || !data?.signedUrl) throw error || new Error('URL indisponible');
+        return data.signedUrl;
+      }
 
       // Compte à rebours d'expiration (plan gratuit : clips supprimés à 72 h).
       function expiryBadge(createdAt) {
@@ -154,28 +162,56 @@
               Copier la légende
             </button>
           </div>` : '';
+        const dl = esc(safeName(c.title));
         return `
         <div style="background:#17171d;border:1px solid #2a2a35;border-radius:16px;padding:16px;">
-          <a href="${c.url ?? '#'}" target="_blank" style="display:block;text-decoration:none;color:#fff;">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">
-              <span style="font-size:14px;font-weight:700;line-height:1.4;">${esc(c.title ?? 'Clip généré')}</span>
-              <span style="background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;white-space:nowrap;margin-left:8px;">${c.score ?? '?'}</span>
-            </div>
-            <div style="font-size:12px;color:#6b7280;">${new Date(c.created_at).toLocaleDateString('fr-FR')} · ${Math.round(c.end_time - c.start_time)}s</div>
-          </a>
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">
+            <span style="font-size:14px;font-weight:700;line-height:1.4;">${esc(c.title ?? 'Clip généré')}</span>
+            <span style="background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;white-space:nowrap;margin-left:8px;">${c.score ?? '?'}</span>
+          </div>
+          <div style="font-size:12px;color:#6b7280;margin-bottom:12px;">${new Date(c.created_at).toLocaleDateString('fr-FR')} · ${Math.round(c.end_time - c.start_time)}s</div>
+          <div style="display:flex;gap:8px;">
+            <button data-open="${esc(c.storage_path)}" style="flex:1;background:#2a2a35;color:#fff;border:0;font-size:12px;font-weight:700;padding:9px;border-radius:9999px;cursor:pointer;">▶ Ouvrir</button>
+            <button data-download="${esc(c.storage_path)}" data-name="${dl}" style="flex:1;background:#f43f8e;color:#fff;border:0;font-size:12px;font-weight:700;padding:9px;border-radius:9999px;cursor:pointer;">⬇ Télécharger</button>
+          </div>
           ${expiryBadge(c.created_at)}
           ${captionBlock}
         </div>`;
       }).join('');
 
-      grid.addEventListener('click', (e) => {
-        const btn = e.target.closest('[data-copy]');
-        if (!btn) return;
-        navigator.clipboard.writeText(btn.getAttribute('data-copy')).then(() => {
-          const prev = btn.textContent;
-          btn.textContent = 'Copié ✓';
-          setTimeout(() => { btn.textContent = prev; }, 1500);
-        });
+      grid.addEventListener('click', async (e) => {
+        const copyBtn = e.target.closest('[data-copy]');
+        if (copyBtn) {
+          navigator.clipboard.writeText(copyBtn.getAttribute('data-copy')).then(() => {
+            const prev = copyBtn.textContent;
+            copyBtn.textContent = 'Copié ✓';
+            setTimeout(() => { copyBtn.textContent = prev; }, 1500);
+          });
+          return;
+        }
+
+        const openBtn = e.target.closest('[data-open]');
+        if (openBtn) {
+          const prev = openBtn.textContent;
+          openBtn.textContent = '…';
+          try { window.open(await freshUrl(openBtn.getAttribute('data-open')), '_blank'); }
+          catch { alert("Impossible d'ouvrir ce clip. Réessaie."); }
+          openBtn.textContent = prev;
+          return;
+        }
+
+        const dlBtn = e.target.closest('[data-download]');
+        if (dlBtn) {
+          const prev = dlBtn.textContent;
+          dlBtn.textContent = '…';
+          try {
+            const url = await freshUrl(dlBtn.getAttribute('data-download'), dlBtn.getAttribute('data-name'));
+            const a = document.createElement('a');
+            a.href = url; a.download = dlBtn.getAttribute('data-name');
+            document.body.appendChild(a); a.click(); a.remove();
+          } catch { alert("Téléchargement impossible. Réessaie."); }
+          dlBtn.textContent = prev;
+        }
       });
     }
   }
