@@ -1105,7 +1105,7 @@ OUTPUT_RESOLUTIONS = {
 PLAN_MAX_RESOLUTION = {"free": "1080p", "pro": "1080p", "equipe": "4k"}
 
 
-def render_clip(source_path: str, clip: dict, words: list, style: dict, resolution: str, out_path: str):
+def render_clip(source_path: str, clip: dict, words: list, style: dict, resolution: str, out_path: str, watermark: bool = False):
     width, height = OUTPUT_RESOLUTIONS[resolution]
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -1139,8 +1139,18 @@ def render_clip(source_path: str, clip: dict, words: list, style: dict, resoluti
             f"crop={width}:{height},gblur=sigma=25[bgb];"
             f"[main]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
             f"[bgb][fg]overlay=(W-w)/2:(H-h)/2[comp];"
-            f"[comp]unsharp=5:5:0.3:5:5:0.0,subtitles={subs_path}[outv]"
+            f"[comp]unsharp=5:5:0.3:5:5:0.0,subtitles={subs_path}"
         )
+        # Filigrane « Sortclip » pour le plan gratuit : texte semi-transparent
+        # en bas à droite, taille proportionnelle à la largeur.
+        if watermark:
+            fontsize = max(24, width // 22)
+            filter_complex += (
+                f",drawtext=text='Sortclip':fontcolor=white@0.55:fontsize={fontsize}:"
+                f"box=1:boxcolor=black@0.25:boxborderw=10:"
+                f"x=w-tw-30:y=h-th-40"
+            )
+        filter_complex += "[outv]"
 
         subprocess.run([
             "ffmpeg", "-y",
@@ -1162,6 +1172,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
     supabase = get_supabase_client()
     plan = get_user_plan(supabase, user_id)
     resolution = PLAN_MAX_RESOLUTION[plan]
+    watermark = pricing.PLANS.get(plan, pricing.PLANS["free"])["watermark"]
     reservations = []
     # Le proxy résidentiel (contournement fiable des blocages YouTube) est un
     # avantage du plan Équipe : ressource facturée à la bande passante, on ne
@@ -1248,7 +1259,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             for i, clip in enumerate(clips):
                 try:
                     out_path = os.path.join(tmp, f"clip_{i}.mp4")
-                    render_clip(local_video, clip, words, style, resolution, out_path)
+                    render_clip(local_video, clip, words, style, resolution, out_path, watermark=watermark)
 
                     storage_path = f"{user_id}/{Path(source_path).stem}_clip{i}.mp4"
                     with open(out_path, "rb") as f:
