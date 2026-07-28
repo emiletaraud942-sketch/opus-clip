@@ -1261,6 +1261,52 @@ def render_clip(source_path: str, clip: dict, words: list, style: dict, resoluti
         ], check=True, capture_output=True)
 
 
+# Colonnes indispensables : jamais retirées, même si l'insertion se plaint.
+_CLIP_BASE_COLS = {
+    "user_id", "source_path", "storage_path", "title", "score",
+    "start_time", "end_time",
+}
+
+
+def _insert_clips_resilient(supabase, rows: list):
+    """Insère les clips en retirant à la volée toute colonne inconnue de la
+    base (migration non appliquée), pour ne jamais perdre de clips. Réessaie
+    en boucle tant que l'erreur nomme une colonne non essentielle."""
+    import re
+    payload = [dict(r) for r in rows]
+    for _ in range(12):   # au pire, autant de retraits que de colonnes optionnelles
+        try:
+            supabase.table("clips").insert(payload).execute()
+            return
+        except Exception as exc:
+            msg = str(exc)
+            # PostgREST : "Could not find the 'xxx' column of 'clips' ..."
+            m = re.search(r"'([^']+)' column", msg) or re.search(r"column \"?([\w]+)\"?", msg)
+            col = m.group(1) if m else None
+            if col and col not in _CLIP_BASE_COLS and any(col in r for r in payload):
+                print(f"[process_video] colonne '{col}' absente en base, insertion sans elle.")
+                payload = [{k: v for k, v in r.items() if k != col} for r in payload]
+                continue
+            # Erreur non liée à une colonne optionnelle : dernier recours,
+            # insertion des seules colonnes de base, clip par clip.
+            print(f"[process_video] insertion en lot impossible ({msg}), repli colonnes de base.")
+            base_rows = [{k: v for k, v in r.items() if k in _CLIP_BASE_COLS} for r in rows]
+            inserted = 0
+            for br in base_rows:
+                try:
+                    supabase.table("clips").insert(br).execute()
+                    inserted += 1
+                except Exception as row_exc:
+                    print(f"[process_video] clip non inséré : {row_exc}")
+            if inserted == 0:
+                raise
+            return
+    # Trop de retraits : on tente une dernière fois en base seule.
+    supabase.table("clips").insert(
+        [{k: v for k, v in r.items() if k in _CLIP_BASE_COLS} for r in rows]
+    ).execute()
+
+
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=2400)
 def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False, preset: str | None = None):
     style = resolve_subtitle_style(subtitle_style, preset=preset)
@@ -1416,30 +1462,26 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             if not rows:
                 raise RuntimeError("Aucun clip n'a pu être monté avec succès pour cette vidéo.")
 
-            _optional_cols = ("caption", "hashtags", "edl", "edl_words", "edl_resolution")
-            try:
-                supabase.table("clips").insert(rows).execute()
-            except Exception as insert_exc:
-                # Rétro-compatibilité : si des colonnes optionnelles (caption,
-                # hashtags, edl…) n'existent pas encore (migration non appliquée),
-                # on réessaie sans elles plutôt que de perdre tout le traitement.
-                if any(c in str(insert_exc) for c in _optional_cols):
-                    print(f"[process_video] colonnes optionnelles absentes, insertion sans: {insert_exc}")
-                    stripped = [
-                        {k: v for k, v in r.items() if k not in _optional_cols}
-                        for r in rows
-                    ]
-                    supabase.table("clips").insert(stripped).execute()
-                else:
-                    raise
+            # Insertion À TOUTE ÉPREUVE : si une colonne n'existe pas encore
+            # (migration non appliquée sur cette base), PostgREST renvoie une
+            # erreur nommant la colonne manquante. On la retire et on réessaie,
+            # au lieu de perdre tous les clips. Les colonnes de base (user_id,
+            # storage_path…) ne sont jamais retirées.
+            _insert_clips_resilient(supabase, rows)
 
             # NOTE : on NE supprime PLUS la vidéo source après traitement — elle
             # est nécessaire pour ré-ajuster les clips (endpoint /adjust). Un
             # nettoyage périodique des sources anciennes pourra être ajouté.
 
-        # Succès : on valide définitivement les minutes réservées.
+        # Succès : les clips sont en base. Les étapes restantes (validation des
+        # minutes, télémétrie) ne doivent JAMAIS faire échouer un traitement qui
+        # a produit des clips — sinon on rembourserait à tort et le job passerait
+        # en "error" alors que les clips existent. On les rend best-effort.
         if reservations:
-            commit_reservations(supabase, reservations, source_seconds=duration)
+            try:
+                commit_reservations(supabase, reservations, source_seconds=duration)
+            except Exception as commit_exc:
+                print(f"[process_video] commit des minutes échoué (non bloquant) : {commit_exc}")
 
         # Télémétrie de coût RÉEL (Phase 3) : sert à valider ou invalider
         # COST_PER_SOURCE_MINUTE_EUR. N'échoue jamais le traitement.

@@ -56,6 +56,9 @@
       Aucun clip généré pour l'instant. Importe une vidéo depuis la page d'accueil pour commencer.
     </div>
 
+    <!-- Bannières d'état des générations récentes (en cours / échec). -->
+    <div id="job-status" style="display:none;margin-bottom:24px;"></div>
+
     <div id="clips-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;"></div>
   </div>
 </section>
@@ -111,6 +114,40 @@
     } catch (e) {
       // Colonnes/table pas encore migrées : on masque le widget sans bloquer.
       console.warn('Compteur d\'usage indisponible :', e);
+    }
+
+    // État des générations récentes : une génération se lance en tâche de
+    // fond ; si elle échoue, l'erreur est stockée dans clip_jobs mais n'était
+    // jusqu'ici jamais montrée — d'où l'impression que « rien n'apparaît ».
+    try {
+      const dayAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const { data: jobs } = await supabase
+        .from('clip_jobs')
+        .select('status, error, created_at')
+        .eq('user_id', session.user.id)
+        .gte('created_at', dayAgo)
+        .order('created_at', { ascending: false });
+      if (jobs && jobs.length) {
+        const processing = jobs.filter(j => j.status === 'processing').length;
+        const failed = jobs.filter(j => j.status === 'error');
+        const box = document.getElementById('job-status');
+        let html = '';
+        if (processing) {
+          html += `<div style="background:rgba(139,92,246,.1);border:1px solid #3a2a55;border-radius:12px;padding:14px 16px;font-size:13px;color:#c4b5fd;margin-bottom:10px;">⏳ ${processing} génération${processing > 1 ? 's' : ''} en cours… Les clips apparaîtront ici automatiquement une fois le traitement terminé (recharge la page dans quelques minutes).</div>`;
+        }
+        if (failed.length) {
+          const reason = (failed[0].error || 'raison inconnue').toString().slice(0, 300);
+          html += `<div style="background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.4);border-radius:12px;padding:14px 16px;font-size:13px;color:#fca5a5;">⚠️ La dernière génération a échoué : <span style="color:#fecaca;"></span>. Tes minutes ont été recréditées, tu peux réessayer.</div>`;
+          box.innerHTML = html;
+          // On insère la raison via textContent pour éviter toute injection.
+          box.querySelector('span').textContent = reason;
+        } else {
+          box.innerHTML = html;
+        }
+        if (html) box.style.display = 'block';
+      }
+    } catch (e) {
+      console.warn('État des générations indisponible :', e);
     }
 
     const { data: clips, error } = await supabase
