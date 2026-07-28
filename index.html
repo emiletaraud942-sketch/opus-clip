@@ -44,7 +44,7 @@
 
       <div id="upload-status" style="display:none;font-size:12px;margin-bottom:12px;"></div>
 
-      <div id="free-tier-note" style="font-size:12px;color:#6b7280;margin-bottom:20px;">Aucune carte bancaire requise · 3 vidéos offertes</div>
+      <div id="free-tier-note" style="font-size:12px;color:#6b7280;margin-bottom:20px;">Aucune carte bancaire requise · 25 min de vidéo offertes / mois</div>
 
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px;">
         <div style="flex:1;height:1px;background:#2a2a35;"></div>
@@ -613,7 +613,7 @@
 
   // La zone d'auth de la nav (Connexion / Mes clips / Déconnexion) est gérée
   // globalement par nav.js sur TOUTES les pages. Ici on ne s'occupe que du
-  // masquage de la mention « 3 vidéos gratuites » pour les plans payants.
+  // masquage de la mention des minutes offertes pour les plans payants.
   async function applyPlanState(user) {
     const { data: profile } = await supabase
       .from('profiles')

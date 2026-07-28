@@ -82,25 +82,15 @@ MAX_CLIPS_PER_VIDEO = 6
 # Passe à True pour activer les zooms automatiques sur les punchlines.
 ENABLE_AUTO_DIRECTOR = False
 
-# Limites d'usage par plan (voir tarifs.html). Le plan "free" est compté à
-# vie (3 vidéos offertes, une fois). Les plans payants sont comptés par mois
-# calendaire, tous statuts confondus (chaque tentative coûte de l'argent en
-# API tierces). Tant qu'aucune facturation (Stripe) n'est branchée, le plan
-# de chaque utilisateur est stocké dans la table Supabase "profiles" et mis
-# à jour manuellement.
-PLAN_MONTHLY_LIMITS = {
-    "free": 3,     # à vie, pas par mois — voir check_quota
-    "pro": 30,
-    "equipe": 60,
-}
+# Les quotas d'usage sont désormais exprimés en MINUTES de source et pilotés
+# par pricing_config.PLANS (voir tarifs.html et les fonctions available_minutes /
+# reserve_minutes / enforce_source_caps). L'ancien décompte « en nombre de
+# vidéos » (PLAN_MONTHLY_LIMITS) a été retiré : il ne reflétait plus le modèle
+# tarifaire réel et n'était plus appelé.
 
-# Comptes exemptés de la limite ci-dessus (phase de test uniquement) — à
-# vider une fois les tests terminés pour que la limite s'applique à tous.
+# Comptes exemptés de la facturation (phase de test uniquement) — à vider une
+# fois les tests terminés pour que les quotas s'appliquent à tous.
 TEST_ACCOUNT_EMAILS = {"emiletaraud942@gmail.com"}
-
-# Durée maximale acceptée pour une vidéo (upload ou lien YouTube), pour éviter
-# qu'un compte gratuit ne lance un traitement démesurément coûteux.
-MAX_VIDEO_DURATION_SECONDS = 60 * 60  # 60 minutes
 
 ALLOWED_ORIGINS = [
     "https://opus-clip-alpha.vercel.app",
