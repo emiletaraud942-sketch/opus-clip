@@ -577,7 +577,32 @@ def extract_signals(video_path: str) -> dict:
     try:
         import numpy as np
         import librosa
-        y, sr = librosa.load(video_path, sr=16000, mono=True)
+        # On décode l'audio en WAV 16 kHz mono via FFmpeg AVANT de charger avec
+        # librosa. Charger un .mp4 directement fait échouer PySoundFile (qui ne
+        # lit pas les conteneurs vidéo) et bascule sur audioread, déprécié et
+        # retiré dans librosa 1.0. Passer par un WAV supprime les warnings, va
+        # plus vite et fiabilise l'extraction. Repli sur le chargement direct si
+        # FFmpeg échoue, pour ne jamais perdre les signaux.
+        wav_path = None
+        try:
+            import subprocess, tempfile
+            fd, wav_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1",
+                 "-ar", "16000", "-f", "wav", wav_path],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            y, sr = librosa.load(wav_path, sr=16000, mono=True)
+        except Exception as ff_exc:
+            print(f"[extract_signals] décodage WAV via FFmpeg indisponible, chargement direct: {ff_exc}")
+            y, sr = librosa.load(video_path, sr=16000, mono=True)
+        finally:
+            if wav_path and os.path.exists(wav_path):
+                try:
+                    os.remove(wav_path)
+                except OSError:
+                    pass
         if len(y):
             hop = 512
             rms = librosa.feature.rms(y=y, hop_length=hop)[0]
