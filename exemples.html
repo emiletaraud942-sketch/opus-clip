@@ -26,48 +26,68 @@
     <div style="text-align:center;max-width:640px;margin:0 auto 56px;">
       <h1 style="font-family:'Space Grotesk',sans-serif;font-size:38px;font-weight:700;margin:0 0 16px;">Des clips générés automatiquement par notre IA</h1>
       <p style="font-size:16px;color:#9ca3af;margin:0;">Voici quelques exemples de clips créés à partir de podcasts, streams et webinars.</p>
-      <p style="font-size:12px;color:#6b7280;margin:12px 0 0;">Illustrations à titre indicatif — pas des résultats clients réels.</p>
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:24px;margin-bottom:48px;">
+    <div id="examples-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:24px;margin-bottom:48px;"></div>
 
-      <div style="position:relative;width:100%;aspect-ratio:9/16;background:#17171d;border:1px solid #2a2a35;border-radius:16px;overflow:hidden;">
-        <div style="position:absolute;inset:0;background:#1f1f28;display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:13px;">Extrait de podcast</div>
-        <div style="position:absolute;top:12px;left:12px;background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;">92 · score viral</div>
-        <div style="position:absolute;bottom:0;left:0;right:0;padding:16px;background:linear-gradient(transparent,rgba(0,0,0,.85));">
-          <div style="font-size:13px;font-weight:700;margin-bottom:4px;">"C'est là que tout a basculé"</div>
-          <div style="font-size:11px;color:#d1d5db;">00:14 · sous-titres · 9:16</div>
-        </div>
-      </div>
-
-      <div style="position:relative;width:100%;aspect-ratio:9/16;background:#17171d;border:1px solid #2a2a35;border-radius:16px;overflow:hidden;">
-        <div style="position:absolute;inset:0;background:#1f1f28;display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:13px;">Extrait de stream</div>
-        <div style="position:absolute;top:12px;left:12px;background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;">88 · score viral</div>
-        <div style="position:absolute;bottom:0;left:0;right:0;padding:16px;background:linear-gradient(transparent,rgba(0,0,0,.85));">
-          <div style="font-size:13px;font-weight:700;margin-bottom:4px;">"Personne ne s'y attendait"</div>
-          <div style="font-size:11px;color:#d1d5db;">02:41 · sous-titres · 9:16</div>
-        </div>
-      </div>
-
-      <div style="position:relative;width:100%;aspect-ratio:9/16;background:#17171d;border:1px solid #2a2a35;border-radius:16px;overflow:hidden;">
-        <div style="position:absolute;inset:0;background:#1f1f28;display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:13px;">Extrait de webinar</div>
-        <div style="position:absolute;top:12px;left:12px;background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;">95 · score viral</div>
-        <div style="position:absolute;bottom:0;left:0;right:0;padding:16px;background:linear-gradient(transparent,rgba(0,0,0,.85));">
-          <div style="font-size:13px;font-weight:700;margin-bottom:4px;">"Voici l'erreur à ne jamais faire"</div>
-          <div style="font-size:11px;color:#d1d5db;">08:03 · sous-titres · 9:16</div>
-        </div>
-      </div>
-
-      <div style="position:relative;width:100%;aspect-ratio:9/16;background:#17171d;border:1px solid #2a2a35;border-radius:16px;overflow:hidden;">
-        <div style="position:absolute;inset:0;background:#1f1f28;display:flex;align-items:center;justify-content:center;color:#6b7280;font-size:13px;">Extrait d'interview</div>
-        <div style="position:absolute;top:12px;left:12px;background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;">90 · score viral</div>
-        <div style="position:absolute;bottom:0;left:0;right:0;padding:16px;background:linear-gradient(transparent,rgba(0,0,0,.85));">
-          <div style="font-size:13px;font-weight:700;margin-bottom:4px;">"Le conseil qui a tout changé"</div>
-          <div style="font-size:11px;color:#d1d5db;">15:22 · sous-titres · 9:16</div>
-        </div>
-      </div>
-
-    </div>
+    <style>.tt-phone video::-webkit-media-controls{display:none;}</style>
+    <script>
+      // Vraies vidéos générées avec Sortclip, au format téléphone TikTok.
+      (function () {
+        const clips = [
+          { src: 'examples/clip1.mp4', title: "On peut mourir ? Ça m'intéresse pas sinon", views: '512 k' },
+          { src: 'examples/clip2.mp4', title: "Panique intérieure, tout lâche en même temps", views: '340 k' },
+          { src: 'examples/clip3.mp4', title: "Panique totale, l'eau rentre dans la maison", views: '890 k' },
+          { src: 'examples/clip4.mp4', title: "Le tremblement de terre me fait le plus peur", views: '128 k' },
+        ];
+        const esc = (s) => String(s).replace(/[&<>"]/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[m]));
+        const ico = (svg, label) =>
+          `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;">
+             <div style="font-size:26px;line-height:1;filter:drop-shadow(0 1px 3px rgba(0,0,0,.6));">${svg}</div>
+             ${label ? `<span style="font-size:11px;font-weight:700;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7);">${label}</span>` : ''}
+           </div>`;
+        const slide = (c) => `
+          <div class="tt-phone" style="position:relative;border-radius:28px;overflow:hidden;border:1px solid #2a2a35;background:#000;box-shadow:0 30px 60px rgba(0,0,0,.5);aspect-ratio:9/16;cursor:pointer;">
+            <video src="${esc(c.src)}" preload="metadata" playsinline loop style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;"></video>
+            <div style="position:absolute;top:12px;left:0;right:0;display:flex;justify-content:center;gap:18px;font-size:13px;color:#fff;pointer-events:none;text-shadow:0 1px 3px rgba(0,0,0,.7);">
+              <span style="opacity:.65;">Abonnements</span>
+              <span style="font-weight:800;border-bottom:2px solid #fff;padding-bottom:3px;">Pour toi</span>
+            </div>
+            <div style="position:absolute;right:8px;bottom:78px;display:flex;flex-direction:column;align-items:center;gap:16px;pointer-events:none;">
+              <div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#f43f8e);border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:16px;">🎬</div>
+              ${ico('❤️', esc(c.views))}
+              ${ico('💬', '')}
+              ${ico('🔖', '')}
+              ${ico('↪️', 'Partager')}
+              <div style="width:34px;height:34px;border-radius:50%;background:#222;border:3px solid #111;display:flex;align-items:center;justify-content:center;font-size:14px;">🎵</div>
+            </div>
+            <div style="position:absolute;left:12px;right:64px;bottom:14px;color:#fff;pointer-events:none;text-shadow:0 1px 4px rgba(0,0,0,.8);">
+              <div style="font-size:14px;font-weight:800;margin-bottom:4px;">@sortclip</div>
+              <div style="font-size:12px;line-height:1.35;margin-bottom:6px;">${esc(c.title)}</div>
+              <div style="font-size:11px;opacity:.9;">🎵 Son original — Sortclip</div>
+            </div>
+            <div class="tt-play" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:56px;height:56px;border-radius:50%;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff;pointer-events:none;">▶</div>
+          </div>`;
+        const grid = document.getElementById('examples-grid');
+        if (grid) {
+          grid.innerHTML = clips.map(slide).join('');
+          grid.querySelectorAll('.tt-phone').forEach((phone) => {
+            const video = phone.querySelector('video');
+            const play = phone.querySelector('.tt-play');
+            phone.addEventListener('click', () => {
+              if (video.paused) {
+                document.querySelectorAll('video').forEach(v => { if (v !== video) v.pause(); });
+                video.play();
+              } else {
+                video.pause();
+              }
+            });
+            video.addEventListener('play', () => { play.style.display = 'none'; });
+            video.addEventListener('pause', () => { play.style.display = 'flex'; });
+          });
+        }
+      })();
+    </script>
 
     <div style="text-align:center;">
       <a href="signup.html" style="background:#f43f8e;color:#fff;font-weight:700;font-size:14px;padding:14px 28px;border-radius:9999px;display:inline-block;">Créer mes propres clips</a>
