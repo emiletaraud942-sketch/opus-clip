@@ -2252,3 +2252,52 @@ def transfer_clips(from_user_id: str, to_user_id: str, dry_run: bool = False):
 
     print(f"[transfer] {transferred}/{len(clips)} clip(s) transféré(s).")
     return {"transferred": transferred, "total": len(clips)}
+
+
+# Bucket public où sont copiés les clips servant d'exemples sur le site.
+EXAMPLES_BUCKET = "examples"
+
+
+@app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")])
+def publish_example_clips(paths: str, names: str = ""):
+    """Copie des clips depuis le bucket privé « clips » vers un bucket PUBLIC
+    « examples », côté serveur (aucun téléchargement local). Renvoie les URL
+    publiques à utiliser dans les pages du site.
+
+    - paths : chemins source dans le bucket clips, séparés par des virgules,
+      ex. "281ab977-.../youtube_..._clip3.mp4,281ab977-.../youtube_..._clip4.mp4"
+    - names : noms de destination optionnels (mêmes séparateurs), ex. "clip7.mp4,clip8.mp4".
+      Par défaut, on reprend le nom de fichier source.
+
+    Lancement :
+        python -m modal run modal_app.py::publish_example_clips --paths "<p1>,<p2>" --names "clip7.mp4,clip8.mp4"
+    """
+    supabase = get_supabase_client()
+
+    # 1) S'assure que le bucket public existe.
+    try:
+        supabase.storage.create_bucket(EXAMPLES_BUCKET, options={"public": True})
+        print(f"[publish] bucket public '{EXAMPLES_BUCKET}' créé.")
+    except Exception as exc:
+        print(f"[publish] bucket '{EXAMPLES_BUCKET}' déjà présent (ok) : {exc}")
+
+    src_list = [p.strip() for p in paths.split(",") if p.strip()]
+    dst_list = [n.strip() for n in names.split(",") if n.strip()]
+    urls = []
+    for i, src in enumerate(src_list):
+        dst = dst_list[i] if i < len(dst_list) else src.split("/")[-1]
+        try:
+            data = supabase.storage.from_(CLIPS_BUCKET).download(src)
+            supabase.storage.from_(EXAMPLES_BUCKET).upload(
+                dst, data, {"content-type": "video/mp4", "upsert": "true"}
+            )
+            url = f"{SUPABASE_URL}/storage/v1/object/public/{EXAMPLES_BUCKET}/{dst}"
+            urls.append(url)
+            print(f"[publish] publié : {src} -> {url}")
+        except Exception as exc:
+            print(f"[publish] échec pour {src} : {exc}")
+
+    print(f"[publish] {len(urls)} clip(s) publié(s).")
+    for u in urls:
+        print("  ", u)
+    return {"urls": urls}
