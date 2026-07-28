@@ -69,6 +69,8 @@ image = (
     .pip_install("yt-dlp @ git+https://github.com/yt-dlp/yt-dlp.git")
     # Le module de config économique doit voyager avec l'app sur Modal.
     .add_local_python_source("pricing_config")
+    # Le moteur EDL (schéma + compilateur FFmpeg + sous-titres) voyage aussi.
+    .add_local_python_source("sortclip")
 )
 
 SOURCE_BUCKET = "videos"
@@ -1105,6 +1107,56 @@ OUTPUT_RESOLUTIONS = {
 PLAN_MAX_RESOLUTION = {"free": "1080p", "pro": "1080p", "equipe": "4k"}
 
 
+# Correspondance style utilisateur -> paramètres de sous-titres EDL.
+_EDL_SIZE = {"petit": 44, "moyen": 60, "grand": 76}
+_EDL_Y = {"bas": 0.80, "milieu": 0.50, "haut": 0.16}
+
+
+def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
+                    resolution: str, out_path: str, source_duration: float,
+                    src_wh: tuple[int, int] | None, watermark: bool, tmp: str):
+    """Rendu d'un clip via le MOTEUR EDL (sortclip). Construit un EDL déclaratif
+    pour le segment, en applique le preset (viral -> « rythme », sinon
+    « podcast_dynamique ») et les réglages de sous-titres choisis par l'utilisateur,
+    génère les sous-titres ASS puis compile vers FFmpeg. Lève en cas d'échec
+    (l'appelant retombe alors sur render_clip)."""
+    from sortclip import build_edl, map_words_to_output, build_ass, render as edl_render
+    from sortclip.edl import Canvas
+
+    clip_words = words_in_range(words, clip["start"], clip["end"])
+    if not clip_words:
+        raise RuntimeError("clip sans mots — repli sur le rendu classique")
+
+    punchy = bool(style.get("punchy"))
+    preset_name = "rythme" if punchy else "podcast_dynamique"
+    sw, sh = (src_wh or (None, None))
+
+    edl, cleaned = build_edl(
+        source_path=source_path, source_duration=source_duration,
+        words=clip_words, preset_name=preset_name, watermark=watermark,
+        source_width=sw, source_height=sh,
+    )
+
+    width, height = OUTPUT_RESOLUTIONS[resolution]
+    cap = edl.captions.model_copy(update={
+        "primary": "#" + SUBTITLE_COLOR_PRESETS[style["textColor"]],
+        "size": _EDL_SIZE[style["size"]],
+        "y": _EDL_Y[style["position"]],
+        "style": "karaoke" if punchy else "plain",
+        "bold": bool(style.get("bold")),
+        "words_per_line": 2 if punchy else 4,
+    })
+    edl = edl.model_copy(update={"canvas": Canvas(w=width, h=height, fps=30), "captions": cap})
+
+    ass_path = os.path.join(tmp, f"{Path(out_path).stem}.ass")
+    words_out = map_words_to_output(cleaned, edl)
+    build_ass(words_out, edl.captions, edl.canvas, ass_path)
+
+    result = edl_render(edl, out_path, ass_path=ass_path)
+    if result.returncode != 0:
+        raise RuntimeError(f"rendu EDL échoué : {result.stderr[-500:]}")
+
+
 def render_clip(source_path: str, clip: dict, words: list, style: dict, resolution: str, out_path: str, watermark: bool = False):
     width, height = OUTPUT_RESOLUTIONS[resolution]
 
@@ -1220,6 +1272,15 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             if not skip_billing:
                 enforce_source_caps(plan, duration)
 
+            # Dimensions source (une seule sonde) pour le moteur EDL : évite
+            # que le compilateur ne relance ffprobe à chaque clip.
+            try:
+                from sortclip.compile import probe_source
+                src_wh = probe_source(local_video)
+            except Exception as exc:
+                print(f"[process_video] sonde dimensions échouée (non bloquant) : {exc}")
+                src_wh = None
+
             if not has_audio_stream(local_video):
                 raise RuntimeError(
                     "Cette vidéo ne contient aucune piste audio exploitable — "
@@ -1259,7 +1320,17 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             for i, clip in enumerate(clips):
                 try:
                     out_path = os.path.join(tmp, f"clip_{i}.mp4")
-                    render_clip(local_video, clip, words, style, resolution, out_path, watermark=watermark)
+                    # Rendu via le moteur EDL ; repli sur l'ancien rendu si
+                    # quoi que ce soit échoue, pour ne jamais perdre un clip.
+                    try:
+                        render_clip_edl(
+                            local_video, clip, words, style, resolution, out_path,
+                            source_duration=duration, src_wh=src_wh,
+                            watermark=watermark, tmp=tmp,
+                        )
+                    except Exception as edl_exc:
+                        print(f"[process_video] moteur EDL indisponible pour le clip {i}, repli : {edl_exc}")
+                        render_clip(local_video, clip, words, style, resolution, out_path, watermark=watermark)
 
                     storage_path = f"{user_id}/{Path(source_path).stem}_clip{i}.mp4"
                     with open(out_path, "rb") as f:

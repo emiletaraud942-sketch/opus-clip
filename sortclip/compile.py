@@ -78,7 +78,7 @@ def build_filter_complex(edl: EDL, ass_path: str | None = None) -> str:
     # --- 4. Fond -------------------------------------------------------------
     if edl.background.mode == "blur":
         parts.append(
-            f"[bgsrc]scale={c.w}:{c.h}:force_original_aspect_ratio=increase,"
+            f"[bgsrc]scale={c.w}:{c.h}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={c.w}:{c.h},gblur=sigma={edl.background.sigma},setsar=1[bg]"
         )
     elif edl.background.mode == "solid":
@@ -94,8 +94,9 @@ def build_filter_complex(edl: EDL, ass_path: str | None = None) -> str:
             f"[fg]pad={c.w}:{c.h}:(ow-iw)/2:(oh-ih)/2:color=black[comp]"
         )
 
-    # --- 6. Sous-titres + filigrane (dernière étape) -------------------------
-    chain = []
+    # --- 6. Netteté + sous-titres + filigrane (dernière étape) ---------------
+    # unsharp compense la perte de détail du recadrage vertical.
+    chain = ["unsharp=5:5:0.3:5:5:0.0"]
     if edl.captions.enabled and ass_path:
         chain.append(f"ass=filename='{_escape_filter_path(ass_path)}'")
     if edl.watermark.enabled:
@@ -151,7 +152,7 @@ def _crop_scale(zoom: float, w: int, h: int) -> str:
         if zoom >= 0.999
         else f"crop=w='2*floor(iw*{zoom:.4f}/2)':h='2*floor(ih*{zoom:.4f}/2)',"
     )
-    return f"{crop}scale={w}:{h},setsar=1"
+    return f"{crop}scale={w}:{h}:flags=lanczos,setsar=1"
 
 
 def build_command(
