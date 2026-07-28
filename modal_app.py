@@ -77,6 +77,11 @@ SOURCE_BUCKET = "videos"
 CLIPS_BUCKET = "clips"
 MAX_CLIPS_PER_VIDEO = 6
 
+# Réalisateur LLM (cadrages/emphases auto sur chaque clip via le moteur EDL).
+# DÉSACTIVÉ par défaut : c'est un appel LLM supplémentaire par clip (~1-2 c/clip).
+# Passe à True pour activer les zooms automatiques sur les punchlines.
+ENABLE_AUTO_DIRECTOR = False
+
 # Limites d'usage par plan (voir tarifs.html). Le plan "free" est compté à
 # vie (3 vidéos offertes, une fois). Les plans payants sont comptés par mois
 # calendaire, tous statuts confondus (chaque tentative coûte de l'argent en
@@ -1148,12 +1153,27 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
     })
     edl = edl.model_copy(update={"canvas": Canvas(w=width, h=height, fps=30), "captions": cap})
 
+    # Mots en temps de SORTIE : servent au réalisateur (index de mots) ET aux
+    # sous-titres.
+    words_out = map_words_to_output(cleaned, edl)
+
+    # Réalisateur LLM (optionnel) : pose cadrages + emphases sur les moments
+    # forts. Désactivé par défaut (coût par clip) ; ne fait jamais échouer.
+    if ENABLE_AUTO_DIRECTOR:
+        try:
+            from anthropic import Anthropic
+            from sortclip import director
+            client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+            events = director.direct(client, words_out)
+            if events:
+                edl = edl.model_copy(update={"events": events})
+        except Exception as exc:
+            print(f"[render_clip_edl] réalisateur ignoré : {exc}")
+
     # Le « videur » : écarte tout événement bancal AVANT le rendu (sans lever).
-    # Sans événements (pas encore de réalisateur LLM) c'est un simple garde-fou.
-    edl, _issues = validate(edl, word_count=len(cleaned))
+    edl, _issues = validate(edl, word_count=len(words_out))
 
     ass_path = os.path.join(tmp, f"{Path(out_path).stem}.ass")
-    words_out = map_words_to_output(cleaned, edl)
     build_ass(words_out, edl.captions, edl.canvas, ass_path)
 
     result = edl_render(edl, out_path, ass_path=ass_path)

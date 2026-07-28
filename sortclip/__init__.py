@@ -25,9 +25,12 @@ from .captions import map_words_to_output, build_ass
 from .compile import build_filter_complex, build_command, render, as_shell, foreground_size
 from .validate import validate, Issue
 from .store import EDLStore
+from .patch import PatchOp, PatchResult, apply_patch, apply_text_adjustment
+from . import director
 
 __all__ = [
     "validate", "Issue", "EDLStore",
+    "PatchOp", "PatchResult", "apply_patch", "apply_text_adjustment", "director",
     "EDL", "Interval", "Canvas", "Source", "Background", "Captions", "Watermark",
     "FramingEvent", "EmphasisEvent", "HoldOnSpeakerEvent", "SpeedEvent",
     "Framing", "Transition", "FRAMING_ZOOM", "new_id",
