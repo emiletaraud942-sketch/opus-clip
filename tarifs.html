@@ -109,6 +109,13 @@
       <button id="buy-pack" style="background:#8b5cf6;color:#fff;font-weight:700;font-size:14px;padding:14px 28px;border:none;border-radius:9999px;cursor:pointer;white-space:nowrap;">Acheter le pack</button>
     </div>
 
+    <!-- Renonciation au droit de rétractation (art. L221-28 du Code de la
+         consommation) : case NON pré-cochée, obligatoire avant paiement. -->
+    <label id="waiver-box" style="display:flex;align-items:flex-start;gap:10px;max-width:720px;margin:0 auto 20px;background:#17171d;border:1px solid #2a2a35;border-radius:14px;padding:16px 18px;font-size:13px;color:#d1d5db;line-height:1.6;cursor:pointer;">
+      <input type="checkbox" id="waiver-check" style="margin-top:3px;accent-color:#f43f8e;flex-shrink:0;" />
+      <span>Je demande l'exécution immédiate du service et je reconnais perdre mon droit de rétractation de 14 jours une fois le traitement de ma première vidéo lancé. Voir nos <a href="cgv.html" style="color:#f9a8c9;text-decoration:underline;">Conditions générales de vente</a>.</span>
+    </label>
+
     <div id="billing-error" style="display:none;max-width:480px;margin:0 auto 24px;background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.4);color:#fca5a5;font-size:13px;padding:12px 14px;border-radius:10px;text-align:center;"></div>
 
     <div style="text-align:center;font-size:13px;color:#6b7280;">
@@ -133,6 +140,17 @@
   // body : { plan } pour un abonnement, { plan:'credit_pack' } pour le pack.
   async function startCheckout(body, button) {
     errorBox.style.display = 'none';
+
+    // Renonciation à la rétractation obligatoire avant tout paiement.
+    const waiver = document.getElementById('waiver-check');
+    if (!waiver.checked) {
+      showBillingError("Pour lancer le paiement, cochez la demande d'exécution immédiate du service (renonciation au droit de rétractation).");
+      document.getElementById('waiver-box').style.borderColor = '#f43f8e';
+      return;
+    }
+    // Consentement horodaté, transmis au serveur pour conservation.
+    body = { ...body, retractationWaiver: true, waiverTimestamp: new Date().toISOString() };
+
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) {
       window.location.href = 'signup.html';

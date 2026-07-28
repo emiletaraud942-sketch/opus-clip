@@ -1595,6 +1595,28 @@ def billing():
 
             plan = payload.get("plan")
 
+            # Renonciation au droit de rétractation (art. L221-28) : consentement
+            # horodaté et conservé côté serveur AVANT de créer la session de
+            # paiement. Sans case cochée, on refuse le paiement.
+            if not payload.get("retractationWaiver"):
+                return JSONResponse(
+                    {"error": "La renonciation au droit de rétractation est requise pour lancer le paiement."},
+                    status_code=400,
+                )
+            try:
+                get_supabase_client().table("consents").insert({
+                    "user_id": user_id,
+                    "kind": "retractation_waiver",
+                    "plan": plan,
+                    "consented_at": payload.get("waiverTimestamp") or _now().isoformat(),
+                    "ip": request.headers.get("x-forwarded-for", request.client.host if request.client else None),
+                    "user_agent": request.headers.get("user-agent"),
+                }).execute()
+            except Exception as exc:
+                # Ne bloque pas l'achat si la table n'est pas encore migrée, mais
+                # journalise pour que la trace de consentement soit corrigée.
+                print(f"[checkout] enregistrement du consentement échoué (à vérifier) : {exc}")
+
             # --- Achat unique du pack crédits (mode payment) ---
             if plan == "credit_pack" or payload.get("creditPack"):
                 if STRIPE_CREDIT_PACK_PRODUCT_ID.endswith("A_CREER"):
