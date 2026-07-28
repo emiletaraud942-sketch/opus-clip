@@ -2198,3 +2198,57 @@ def reconcile_orphan_clips(user_id: str, dry_run: bool = False):
 
     print(f"[reconcile] {recovered} clip(s) récupéré(s) pour {user_id}.")
     return {"recovered": recovered, "orphans": orphans}
+
+
+@app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")])
+def transfer_clips(from_user_id: str, to_user_id: str, dry_run: bool = False):
+    """Transfère tous les clips d'un compte vers un autre : déplace les .mp4
+    dans le stockage (dossier from_user_id/ -> to_user_id/) ET met à jour les
+    lignes en base (user_id + chemins). Utile quand des clips ont été générés
+    sous un compte différent de celui utilisé pour se connecter.
+
+    Lancement depuis ta machine :
+        python -m modal run modal_app.py::transfer_clips --from-user-id <ANCIEN_UUID> --to-user-id <NOUVEAU_UUID>
+    (ajoute --dry-run pour simuler sans rien modifier)"""
+    supabase = get_supabase_client()
+
+    clips = (
+        supabase.table("clips").select("id,storage_path,source_path")
+        .eq("user_id", from_user_id).execute().data or []
+    )
+    print(f"[transfer] {len(clips)} clip(s) à transférer de {from_user_id} vers {to_user_id}.")
+    if not clips:
+        return {"transferred": 0}
+
+    transferred = 0
+    for c in clips:
+        old_path = c.get("storage_path") or ""
+        name = old_path.split("/")[-1]
+        new_path = f"{to_user_id}/{name}"
+        if dry_run:
+            print(f"[transfer][dry-run] {old_path} -> {new_path}")
+            continue
+        # 1) Déplace le fichier dans le stockage (si nécessaire).
+        if old_path and old_path != new_path:
+            try:
+                supabase.storage.from_(CLIPS_BUCKET).move(old_path, new_path)
+            except Exception as exc:
+                # Peut déjà avoir été déplacé, ou absent : on tente quand même la
+                # mise à jour de la ligne, mais on le signale.
+                print(f"[transfer] déplacement stockage '{old_path}' -> '{new_path}' : {exc}")
+        # 2) Met à jour la ligne en base (propriétaire + chemins).
+        new_source = c.get("source_path") or ""
+        if new_source.startswith(f"{from_user_id}/"):
+            new_source = f"{to_user_id}/" + new_source.split("/", 1)[1]
+        try:
+            supabase.table("clips").update({
+                "user_id": to_user_id,
+                "storage_path": new_path,
+                "source_path": new_source or new_path,
+            }).eq("id", c["id"]).execute()
+            transferred += 1
+        except Exception as exc:
+            print(f"[transfer] échec mise à jour ligne {c['id']} : {exc}")
+
+    print(f"[transfer] {transferred}/{len(clips)} clip(s) transféré(s).")
+    return {"transferred": transferred, "total": len(clips)}
