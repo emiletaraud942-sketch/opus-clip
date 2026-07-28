@@ -23,8 +23,11 @@ from .presets import PRESETS, get_preset
 from .build import build_edl, clean_words
 from .captions import map_words_to_output, build_ass
 from .compile import build_filter_complex, build_command, render, as_shell, foreground_size
+from .validate import validate, Issue
+from .store import EDLStore
 
 __all__ = [
+    "validate", "Issue", "EDLStore",
     "EDL", "Interval", "Canvas", "Source", "Background", "Captions", "Watermark",
     "FramingEvent", "EmphasisEvent", "HoldOnSpeakerEvent", "SpeedEvent",
     "Framing", "Transition", "FRAMING_ZOOM", "new_id",

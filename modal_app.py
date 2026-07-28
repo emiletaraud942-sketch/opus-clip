@@ -1120,7 +1120,7 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
     « podcast_dynamique ») et les réglages de sous-titres choisis par l'utilisateur,
     génère les sous-titres ASS puis compile vers FFmpeg. Lève en cas d'échec
     (l'appelant retombe alors sur render_clip)."""
-    from sortclip import build_edl, map_words_to_output, build_ass, render as edl_render
+    from sortclip import build_edl, map_words_to_output, build_ass, render as edl_render, validate
     from sortclip.edl import Canvas
 
     clip_words = words_in_range(words, clip["start"], clip["end"])
@@ -1147,6 +1147,10 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
         "words_per_line": 2 if punchy else 4,
     })
     edl = edl.model_copy(update={"canvas": Canvas(w=width, h=height, fps=30), "captions": cap})
+
+    # Le « videur » : écarte tout événement bancal AVANT le rendu (sans lever).
+    # Sans événements (pas encore de réalisateur LLM) c'est un simple garde-fou.
+    edl, _issues = validate(edl, word_count=len(cleaned))
 
     ass_path = os.path.join(tmp, f"{Path(out_path).stem}.ass")
     words_out = map_words_to_output(cleaned, edl)
