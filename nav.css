@@ -10,8 +10,16 @@
 .nav-toggle { display:none; background:none; border:none; color:#fff; font-size:22px; cursor:pointer; padding:4px 8px; }
 .nav-auth { display:flex; align-items:center; gap:16px; }
 
+.site-footer { border-top:1px solid #2a2a35; margin-top:64px; padding:28px 32px; background:#0f0f14; font-family:'Inter',sans-serif; }
+.site-footer-inner { max-width:1240px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; }
+.site-footer-brand { color:#6b7280; font-size:13px; }
+.site-footer-links { display:flex; flex-wrap:wrap; gap:20px; }
+.site-footer-link { color:#9ca3af; font-size:13px; text-decoration:none; }
+.site-footer-link:hover { color:#fff; }
+
 @media (max-width: 720px) {
   .nav-toggle { display:block; }
+  .site-footer-inner { flex-direction:column; align-items:flex-start; }
   .nav-links {
     display:none;
     position:absolute; top:100%; left:0; right:0;

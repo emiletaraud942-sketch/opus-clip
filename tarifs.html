@@ -176,6 +176,8 @@
   document.getElementById('subscribe-equipe').addEventListener('click', (e) => subscribe('equipe', e.target));
   document.getElementById('buy-pack').addEventListener('click', (e) => startCheckout({ plan: 'credit_pack' }, e.target));
 </script>
+<div id="footer-root"></div>
+<script type="module">import { renderFooter } from './nav.js'; renderFooter();</script>
 <script defer src="/_vercel/insights/script.js"></script>
 </body>
 </html>

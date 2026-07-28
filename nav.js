@@ -49,6 +49,38 @@ async function refreshNavAuth() {
   // Si pas de session : on laisse le CTA par défaut déjà rendu (Connexion / S'inscrire).
 }
 
+// Pied de page légal, uniforme sur toutes les pages. Injecté dans
+// #footer-root s'il existe, sinon ajouté en fin de <body>. Réutilise les
+// classes de nav.css (aucun style inline nouveau).
+const FOOTER_LINKS = [
+  { href: 'mentions-legales.html', label: 'Mentions légales' },
+  { href: 'cgu.html', label: 'CGU' },
+  { href: 'cgv.html', label: 'CGV' },
+  { href: 'politique-confidentialite.html', label: 'Confidentialité' },
+  { href: 'mailto:contact@sortclip.com', label: 'Contact' },
+];
+
+export function renderFooter() {
+  let root = document.getElementById('footer-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'footer-root';
+    document.body.appendChild(root);
+  }
+  const year = new Date().getFullYear();
+  const linksHtml = FOOTER_LINKS.map(l =>
+    `<a href="${l.href}" class="site-footer-link">${l.label}</a>`
+  ).join('');
+  root.innerHTML = `
+    <footer class="site-footer">
+      <div class="site-footer-inner">
+        <span class="site-footer-brand">© ${year} Sortclip</span>
+        <nav class="site-footer-links">${linksHtml}</nav>
+      </div>
+    </footer>
+  `;
+}
+
 export function renderNav({ active = '', ctaVariant = 'default' } = {}) {
   const root = document.getElementById('nav-root');
   if (!root) return;
