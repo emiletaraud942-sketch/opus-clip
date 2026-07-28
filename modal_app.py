@@ -1180,6 +1180,10 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
     if result.returncode != 0:
         raise RuntimeError(f"rendu EDL échoué : {result.stderr[-500:]}")
 
+    # On renvoie l'EDL final (validé) + les mots nettoyés (temps source) : ils
+    # sont persistés avec le clip pour permettre l'ajustement ultérieur.
+    return edl, cleaned
+
 
 def render_clip(source_path: str, clip: dict, words: list, style: dict, resolution: str, out_path: str, watermark: bool = False):
     width, height = OUTPUT_RESOLUTIONS[resolution]
@@ -1346,8 +1350,10 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     out_path = os.path.join(tmp, f"clip_{i}.mp4")
                     # Rendu via le moteur EDL ; repli sur l'ancien rendu si
                     # quoi que ce soit échoue, pour ne jamais perdre un clip.
+                    clip_edl = None
+                    clip_edl_words = None
                     try:
-                        render_clip_edl(
+                        clip_edl, clip_edl_words = render_clip_edl(
                             local_video, clip, words, style, resolution, out_path,
                             source_duration=duration, src_wh=src_wh,
                             watermark=watermark, tmp=tmp,
@@ -1380,6 +1386,11 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                         "end_time": clip["end"],
                         "caption": copy["caption"],
                         "hashtags": copy["hashtags"],
+                        # EDL persisté pour l'ajustement ultérieur (null si le
+                        # clip est passé par le rendu de repli).
+                        "edl": clip_edl.model_dump(mode="json") if clip_edl else None,
+                        "edl_words": clip_edl_words,
+                        "edl_resolution": resolution,
                     })
                 except Exception as clip_exc:
                     # Un clip qui échoue au montage ne doit pas faire échouer
@@ -1390,27 +1401,26 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             if not rows:
                 raise RuntimeError("Aucun clip n'a pu être monté avec succès pour cette vidéo.")
 
+            _optional_cols = ("caption", "hashtags", "edl", "edl_words", "edl_resolution")
             try:
                 supabase.table("clips").insert(rows).execute()
             except Exception as insert_exc:
-                # Rétro-compatibilité : si les colonnes caption/hashtags
-                # n'existent pas encore (migration non appliquée), on réessaie
-                # sans elles plutôt que de perdre tout le traitement.
-                if "caption" in str(insert_exc) or "hashtags" in str(insert_exc):
-                    print(f"[process_video] colonnes caption/hashtags absentes, insertion sans: {insert_exc}")
+                # Rétro-compatibilité : si des colonnes optionnelles (caption,
+                # hashtags, edl…) n'existent pas encore (migration non appliquée),
+                # on réessaie sans elles plutôt que de perdre tout le traitement.
+                if any(c in str(insert_exc) for c in _optional_cols):
+                    print(f"[process_video] colonnes optionnelles absentes, insertion sans: {insert_exc}")
                     stripped = [
-                        {k: v for k, v in r.items() if k not in ("caption", "hashtags")}
+                        {k: v for k, v in r.items() if k not in _optional_cols}
                         for r in rows
                     ]
                     supabase.table("clips").insert(stripped).execute()
                 else:
                     raise
 
-            if not youtube_url:
-                # La vidéo source a déjà été traitée : on la supprime du bucket
-                # "videos" pour ne pas payer du stockage indéfiniment. Les
-                # clips générés, eux, restent dans le bucket "clips".
-                supabase.storage.from_(SOURCE_BUCKET).remove([source_path])
+            # NOTE : on NE supprime PLUS la vidéo source après traitement — elle
+            # est nécessaire pour ré-ajuster les clips (endpoint /adjust). Un
+            # nettoyage périodique des sources anciennes pourra être ajouté.
 
         # Succès : on valide définitivement les minutes réservées.
         if reservations:
@@ -1752,6 +1762,140 @@ def billing():
                 print(f"[webhook] Abonnement de {user_id} terminé — retour au plan 'free'.")
 
         return {"received": True}
+
+    return web_app
+
+
+# =====================================================================
+# Ajustement d'un clip existant (édition par texte, moteur EDL)
+# =====================================================================
+
+def _rerender_from_edl(edl_dict: dict, edl_words: list, resolution: str,
+                       source_local: str, out_path: str, tmp: str):
+    """Re-rend un clip à partir d'un EDL stocké + les mots + la source locale."""
+    from sortclip import EDL, map_words_to_output, build_ass, render as edl_render, validate
+    from sortclip.edl import Canvas
+
+    edl = EDL.model_validate(edl_dict)
+    # Réancre la source sur le fichier fraîchement téléchargé + la résolution.
+    w, h = OUTPUT_RESOLUTIONS.get(resolution, (1080, 1920))
+    edl = edl.model_copy(update={
+        "source": edl.source.model_copy(update={"path": source_local}),
+        "canvas": Canvas(w=w, h=h, fps=edl.canvas.fps),
+    })
+    edl, _ = validate(edl, word_count=len(edl_words or []))
+    ass_path = os.path.join(tmp, "clip.ass")
+    words_out = map_words_to_output(edl_words or [], edl)
+    build_ass(words_out, edl.captions, edl.canvas, ass_path)
+    result = edl_render(edl, out_path, ass_path=ass_path)
+    if result.returncode != 0:
+        raise RuntimeError(f"re-rendu échoué : {result.stderr[-500:]}")
+
+
+@app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=1200)
+def rerender_clip(user_id: str, clip_id: str):
+    """Re-génère la vidéo d'un clip depuis son EDL (après ajustement), la
+    ré-uploade au même emplacement et incrémente edl_rev (signal de fin)."""
+    supabase = get_supabase_client()
+    row = (
+        supabase.table("clips")
+        .select("edl,edl_words,edl_resolution,source_path,storage_path,user_id,edl_rev")
+        .eq("id", clip_id).maybe_single().execute().data
+    )
+    if not row or row.get("user_id") != user_id or not row.get("edl"):
+        print(f"[rerender_clip] clip {clip_id} introuvable / non éligible")
+        return
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "source.mp4")
+            data = supabase.storage.from_(SOURCE_BUCKET).download(row["source_path"])
+            Path(src).write_bytes(data)
+            out = os.path.join(tmp, "clip.mp4")
+            _rerender_from_edl(row["edl"], row.get("edl_words"),
+                               row.get("edl_resolution") or "1080p", src, out, tmp)
+            with open(out, "rb") as f:
+                supabase.storage.from_(CLIPS_BUCKET).upload(
+                    row["storage_path"], f, {"content-type": "video/mp4", "upsert": "true"}
+                )
+        supabase.table("clips").update(
+            {"edl_rev": (row.get("edl_rev") or 0) + 1}
+        ).eq("id", clip_id).execute()
+        print(f"[rerender_clip] clip {clip_id} ré-rendu (rev {(row.get('edl_rev') or 0) + 1})")
+    except Exception as exc:
+        # Source probablement indisponible, ou rendu en échec. On journalise ;
+        # le front finira par afficher un délai dépassé.
+        print(f"[rerender_clip] échec pour {clip_id} : {exc}")
+
+
+@app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")])
+@modal.asgi_app()
+def adjust():
+    """Endpoint d'ajustement par texte d'un clip existant.
+    Header : Authorization: Bearer <token>. Body : {"clipId": "...", "instruction": "..."}.
+    Applique la consigne comme un PATCH sur l'EDL stocké (déterministe, ou LLM
+    en repli), sauvegarde le nouvel EDL, et lance un re-rendu en arrière-plan."""
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+
+    web_app = FastAPI()
+    web_app.add_middleware(
+        CORSMiddleware, allow_origins=ALLOWED_ORIGINS,
+        allow_methods=["POST", "OPTIONS"], allow_headers=["*"],
+    )
+
+    @web_app.post("/")
+    async def handle(payload: dict, request: Request):
+        try:
+            auth_header = request.headers.get("authorization", "")
+            auth_result = verify_user_token(auth_header.replace("Bearer ", ""))
+            if not auth_result:
+                return JSONResponse({"error": "Non authentifié"}, status_code=401)
+            user_id, _email = auth_result
+
+            clip_id = payload.get("clipId")
+            instruction = (payload.get("instruction") or "").strip()
+            if not clip_id or not instruction:
+                return JSONResponse({"error": "clipId et instruction requis"}, status_code=400)
+
+            supabase = get_supabase_client()
+            row = (
+                supabase.table("clips").select("edl,user_id,edl_rev")
+                .eq("id", clip_id).maybe_single().execute().data
+            )
+            if not row or row.get("user_id") != user_id:
+                return JSONResponse({"error": "Clip introuvable"}, status_code=404)
+            if not row.get("edl"):
+                return JSONResponse(
+                    {"error": "Ce clip a été généré avant l'édition par texte et ne peut pas être ajusté. Régénère-le pour l'activer."},
+                    status_code=400,
+                )
+
+            from sortclip import EDL, apply_text_adjustment
+            edl = EDL.model_validate(row["edl"])
+            edl2, notes = apply_text_adjustment(edl, instruction)
+
+            # Repli LLM si la consigne n'a pas été comprise par le déterministe.
+            if any("non reconnue" in n for n in notes):
+                try:
+                    from anthropic import Anthropic
+                    from sortclip import director, apply_patch
+                    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+                    ops = director.adjust_with_text(client, edl, instruction)
+                    if ops:
+                        res = apply_patch(edl, ops)
+                        edl2, notes = res.edl, [f"{len(res.applied)} ajustement(s) appliqué(s)"]
+                except Exception as exc:
+                    print(f"[adjust] repli LLM indisponible : {exc}")
+
+            supabase.table("clips").update(
+                {"edl": edl2.model_dump(mode="json")}
+            ).eq("id", clip_id).execute()
+            rerender_clip.spawn(user_id=user_id, clip_id=clip_id)
+
+            return {"status": "processing", "notes": notes, "rev": row.get("edl_rev") or 0}
+        except Exception as exc:
+            print(f"[adjust] erreur : {exc}")
+            return JSONResponse({"error": f"Erreur serveur : {exc}"}, status_code=500)
 
     return web_app
 

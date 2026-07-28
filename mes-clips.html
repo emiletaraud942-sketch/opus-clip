@@ -63,6 +63,7 @@
 <script type="module">
   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   import { SUPABASE_URL, SUPABASE_ANON_KEY } from './supabase-config.js';
+  import { ADJUST_URL } from './modal-config.js';
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -176,6 +177,17 @@
           </div>
           ${expiryBadge(c.created_at)}
           ${captionBlock}
+          ${c.edl ? `
+          <div style="margin-top:12px;padding:10px;background:#0f0f14;border:1px solid #2a2a35;border-radius:10px;">
+            <div style="font-size:11px;color:#9ca3af;margin-bottom:6px;">Ajuster ce clip (texte)</div>
+            <input data-adjust-input="${c.id}" placeholder="ex. « moins de zooms », « sous-titres plus gros », « en jaune »"
+              style="width:100%;box-sizing:border-box;background:#17171d;border:1px solid #2a2a35;color:#fff;font-size:12px;padding:8px;border-radius:8px;" />
+            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
+              <button data-adjust="${c.id}" data-rev="${c.edl_rev ?? 0}"
+                style="background:#8b5cf6;color:#fff;border:0;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">Ajuster</button>
+              <span data-adjust-status="${c.id}" style="font-size:11px;color:#9ca3af;"></span>
+            </div>
+          </div>` : ''}
         </div>`;
       }).join('');
 
@@ -211,6 +223,46 @@
             document.body.appendChild(a); a.click(); a.remove();
           } catch { alert("Téléchargement impossible. Réessaie."); }
           dlBtn.textContent = prev;
+          return;
+        }
+
+        // Ajustement par texte : envoie la consigne, puis attend la fin du
+        // re-rendu en surveillant edl_rev.
+        const adjBtn = e.target.closest('[data-adjust]');
+        if (adjBtn) {
+          const clipId = adjBtn.getAttribute('data-adjust');
+          const input = grid.querySelector(`[data-adjust-input="${clipId}"]`);
+          const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
+          const instruction = (input?.value || '').trim();
+          if (!instruction) { status.style.color = '#fca5a5'; status.textContent = 'Écris une consigne.'; return; }
+          adjBtn.disabled = true; status.style.color = '#9ca3af'; status.textContent = 'Envoi…';
+          try {
+            const { data: { session } } = await supabase.auth.getSession();
+            const res = await fetch(ADJUST_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+              body: JSON.stringify({ clipId, instruction }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) { status.style.color = '#fca5a5'; status.textContent = data.error || 'Échec.'; adjBtn.disabled = false; return; }
+            const baseRev = data.rev ?? Number(adjBtn.getAttribute('data-rev')) || 0;
+            status.textContent = ((data.notes || []).join(' · ') || 'Ajustement') + ' — re-rendu en cours…';
+            let tries = 0;
+            const poll = setInterval(async () => {
+              tries += 1;
+              const { data: row } = await supabase.from('clips').select('edl_rev').eq('id', clipId).maybeSingle();
+              if (row && Number(row.edl_rev) > baseRev) {
+                clearInterval(poll); status.style.color = '#86efac';
+                status.textContent = 'Clip mis à jour ✓ — rouvre-le pour voir.';
+                adjBtn.disabled = false; adjBtn.setAttribute('data-rev', String(row.edl_rev));
+              } else if (tries > 40) {
+                clearInterval(poll); status.style.color = '#fca5a5';
+                status.textContent = 'Délai dépassé — réessaie.'; adjBtn.disabled = false;
+              }
+            }, 3000);
+          } catch {
+            status.style.color = '#fca5a5'; status.textContent = 'Erreur réseau.'; adjBtn.disabled = false;
+          }
         }
       });
     }
