@@ -1960,3 +1960,96 @@ def cleanup_free_clips():
 
     if total:
         print(f"[cleanup] {total} clip(s) gratuit(s) de plus de {retention_h} h supprimé(s).")
+
+
+# Rétention des vidéos SOURCE (bucket "videos"). Les clips restent intacts ;
+# on ne supprime que la vidéo longue d'origine, qui n'est utile que pour
+# ré-ajuster un clip (timeline / texte). Passé ce délai, l'ajustement n'est
+# plus possible pour ce clip — sauf s'il est marqué « protégé » (bouton 🔒).
+RETENTION_SOURCE_DAYS = 30
+
+
+def _list_source_files(supabase, prefix: str) -> list[dict]:
+    """Liste récursivement les fichiers d'un dossier du bucket source."""
+    out = []
+    try:
+        entries = supabase.storage.from_(SOURCE_BUCKET).list(prefix) or []
+    except Exception as exc:
+        print(f"[cleanup-src] list('{prefix}') a échoué : {exc}")
+        return out
+    for e in entries:
+        name = e.get("name")
+        if not name:
+            continue
+        full = f"{prefix}/{name}" if prefix else name
+        # Un dossier n'a pas de métadonnées de fichier (id/metadata None).
+        if e.get("id") is None and e.get("metadata") is None:
+            out.extend(_list_source_files(supabase, full))
+        else:
+            out.append({"path": full, "meta": e})
+    return out
+
+
+@app.function(
+    image=image,
+    secrets=[modal.Secret.from_name("sortclip-secrets")],
+    schedule=modal.Cron("30 3 * * *"),   # une fois par jour, 03h30 UTC
+)
+def cleanup_old_sources():
+    """Supprime du bucket « videos » les vidéos SOURCE de plus de
+    RETENTION_SOURCE_DAYS jours, SAUF celles référencées par un clip protégé
+    (clips.protected = true). Les clips eux-mêmes ne sont jamais touchés ici."""
+    supabase = get_supabase_client()
+    cutoff = _now() - timedelta(days=RETENTION_SOURCE_DAYS)
+
+    # 1) Sources à protéger : source_path de tout clip marqué protégé.
+    protected = (
+        supabase.table("clips").select("source_path")
+        .eq("protected", True).execute().data or []
+    )
+    protected_paths = {r["source_path"] for r in protected if r.get("source_path")}
+    print(f"[cleanup-src] {len(protected_paths)} source(s) protégée(s).")
+
+    # 2) Parcours des dossiers utilisateurs à la racine du bucket.
+    try:
+        roots = supabase.storage.from_(SOURCE_BUCKET).list("") or []
+    except Exception as exc:
+        print(f"[cleanup-src] impossible de lister le bucket : {exc}")
+        return
+
+    to_delete = []
+    for r in roots:
+        name = r.get("name")
+        if not name or (r.get("id") is not None and r.get("metadata") is not None):
+            # On ne s'intéresse qu'aux dossiers (un fichier à la racine est ignoré).
+            continue
+        for f in _list_source_files(supabase, name):
+            path = f["path"]
+            if path in protected_paths:
+                continue
+            meta = f.get("meta") or {}
+            created = meta.get("created_at") or meta.get("updated_at")
+            old = False
+            if created:
+                try:
+                    ts = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    old = ts < cutoff
+                except Exception:
+                    old = False
+            if old:
+                to_delete.append(path)
+
+    if not to_delete:
+        print("[cleanup-src] aucune source ancienne à supprimer.")
+        return
+
+    for i in range(0, len(to_delete), 100):
+        batch = to_delete[i:i + 100]
+        try:
+            supabase.storage.from_(SOURCE_BUCKET).remove(batch)
+        except Exception as exc:
+            print(f"[cleanup-src] échec suppression lot (on continue) : {exc}")
+    print(f"[cleanup-src] {len(to_delete)} source(s) de plus de "
+          f"{RETENTION_SOURCE_DAYS} j supprimée(s).")

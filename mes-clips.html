@@ -177,6 +177,13 @@
             <button data-download="${esc(c.storage_path)}" data-name="${dl}" style="flex:1;background:#f43f8e;color:#fff;border:0;font-size:12px;font-weight:700;padding:9px;border-radius:9999px;cursor:pointer;">⬇ Télécharger</button>
           </div>
           ${expiryBadge(c.created_at)}
+          <div style="margin-top:8px;">
+            <button data-protect="${c.id}" data-on="${c.protected ? '1' : '0'}"
+              title="Protège la vidéo source de ce clip contre le nettoyage automatique (30 j). Nécessaire pour pouvoir ré-ajuster le clip plus tard."
+              style="background:${c.protected ? '#1f2937' : 'transparent'};border:1px solid ${c.protected ? '#f59e0b' : '#3a3a48'};color:${c.protected ? '#fbbf24' : '#9ca3af'};font-size:11px;font-weight:700;padding:6px 12px;border-radius:9999px;cursor:pointer;">
+              ${c.protected ? '🔒 Protégé' : '🔓 Protéger la source'}
+            </button>
+          </div>
           ${captionBlock}
           ${c.edl ? `
           <div style="margin-top:12px;padding:10px;background:#0f0f14;border:1px solid #2a2a35;border-radius:10px;">
@@ -227,6 +234,30 @@
             document.body.appendChild(a); a.click(); a.remove();
           } catch { alert("Téléchargement impossible. Réessaie."); }
           dlBtn.textContent = prev;
+          return;
+        }
+
+        // Protéger / déprotéger la vidéo source (empêche le nettoyage auto).
+        const protBtn = e.target.closest('[data-protect]');
+        if (protBtn) {
+          const clipId = protBtn.getAttribute('data-protect');
+          const next = protBtn.getAttribute('data-on') !== '1';
+          const prev = protBtn.textContent;
+          protBtn.textContent = '…'; protBtn.disabled = true;
+          try {
+            const { error } = await supabase.from('clips').update({ protected: next }).eq('id', clipId);
+            if (error) throw error;
+            protBtn.setAttribute('data-on', next ? '1' : '0');
+            if (clipsById[clipId]) clipsById[clipId].protected = next;
+            protBtn.textContent = next ? '🔒 Protégé' : '🔓 Protéger la source';
+            protBtn.style.background = next ? '#1f2937' : 'transparent';
+            protBtn.style.borderColor = next ? '#f59e0b' : '#3a3a48';
+            protBtn.style.color = next ? '#fbbf24' : '#9ca3af';
+          } catch {
+            alert('Impossible de modifier la protection. Réessaie.');
+            protBtn.textContent = prev;
+          }
+          protBtn.disabled = false;
           return;
         }
 
