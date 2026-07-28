@@ -369,15 +369,27 @@
         const outDur = (edl.keeps || []).reduce((s, k) => s + (k.end - k.start), 0)
           || Math.max(1, (c.end_time - c.start_time) || 1);
         const COLORS = { wide: '#3b82f6', medium: '#8b5cf6', tight: '#f43f8e' };
+        // Libellés français affichés à l'utilisateur (la valeur interne reste
+        // en anglais, attendue par le moteur de rendu).
+        const LABELS = { wide: 'Plan large', medium: 'Plan moyen', tight: 'Gros plan' };
         const ORDER = ['wide', 'medium', 'tight'];
         let framings = events.filter(e => e.op === 'framing').map(e => ({ ...e }));
         const others = events.filter(e => e.op !== 'framing');   // emphases… préservés
 
         box.innerHTML = `
-          <div style="font-size:11px;color:#9ca3af;margin-bottom:6px;">Glisse une pastille pour déplacer un zoom · clique le libellé pour changer (wide→medium→tight) · × pour retirer.</div>
+          <div style="font-size:12px;color:#d1d5db;line-height:1.55;margin-bottom:8px;">
+            <strong style="color:#fff;">Réglez le cadrage tout au long du clip.</strong>
+            Chaque pastille marque le moment où l'image passe à un cadrage donné. Trois choix possibles :
+            <span style="display:flex;flex-wrap:wrap;gap:12px;margin-top:6px;">
+              <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#3b82f6;"></span><strong style="color:#fff;">Plan large</strong> — on voit toute la scène</span>
+              <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#8b5cf6;"></span><strong style="color:#fff;">Plan moyen</strong> — cadrage rapproché</span>
+              <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#f43f8e;"></span><strong style="color:#fff;">Gros plan</strong> — zoom serré sur le visage</span>
+            </span>
+          </div>
+          <div style="font-size:11px;color:#9ca3af;margin-bottom:6px;">Glissez une pastille pour déplacer le changement de cadrage · cliquez son libellé pour changer de cadrage (Plan large → Plan moyen → Gros plan) · × pour la retirer.</div>
           <div data-track style="position:relative;height:56px;background:#0f0f14;border:1px solid #2a2a35;border-radius:8px;overflow:hidden;touch-action:none;user-select:none;"></div>
           <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;">
-            <button data-add style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:6px 12px;border-radius:9999px;cursor:pointer;">+ Zoom</button>
+            <button data-add style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:6px 12px;border-radius:9999px;cursor:pointer;">+ Ajouter un cadrage</button>
             <button data-save style="background:#8b5cf6;border:0;color:#fff;font-size:11px;font-weight:700;padding:6px 14px;border-radius:9999px;cursor:pointer;">Enregistrer</button>
             <span data-tl-status style="font-size:11px;color:#9ca3af;"></span>
           </div>`;
@@ -398,7 +410,7 @@
             const pill = document.createElement('div');
             pill.dataset.idx = String(idx);
             pill.style.cssText = `position:absolute;left:${pct}%;top:20px;transform:translateX(-50%);background:${COLORS[f.value] || '#8b5cf6'};color:#fff;font-size:10px;font-weight:800;padding:4px 8px;border-radius:9999px;cursor:grab;white-space:nowrap;display:flex;align-items:center;gap:6px;`;
-            pill.innerHTML = `<span data-cycle>${f.value}</span><span data-del style="cursor:pointer;opacity:.85;">×</span>`;
+            pill.innerHTML = `<span data-cycle>${LABELS[f.value] || f.value}</span><span data-del style="cursor:pointer;opacity:.85;">×</span>`;
             track.appendChild(pill);
             let dragging = false;
             pill.addEventListener('pointerdown', ev => {
