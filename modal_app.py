@@ -1854,8 +1854,9 @@ def adjust():
 
             clip_id = payload.get("clipId")
             instruction = (payload.get("instruction") or "").strip()
-            if not clip_id or not instruction:
-                return JSONResponse({"error": "clipId et instruction requis"}, status_code=400)
+            edited_events = payload.get("events")   # édition visuelle (timeline)
+            if not clip_id or (not instruction and edited_events is None):
+                return JSONResponse({"error": "clipId et (instruction ou events) requis"}, status_code=400)
 
             supabase = get_supabase_client()
             row = (
@@ -1866,26 +1867,46 @@ def adjust():
                 return JSONResponse({"error": "Clip introuvable"}, status_code=404)
             if not row.get("edl"):
                 return JSONResponse(
-                    {"error": "Ce clip a été généré avant l'édition par texte et ne peut pas être ajusté. Régénère-le pour l'activer."},
+                    {"error": "Ce clip a été généré avant l'édition et ne peut pas être ajusté. Régénère-le pour l'activer."},
                     status_code=400,
                 )
 
             from sortclip import EDL, apply_text_adjustment
             edl = EDL.model_validate(row["edl"])
-            edl2, notes = apply_text_adjustment(edl, instruction)
 
-            # Repli LLM si la consigne n'a pas été comprise par le déterministe.
-            if any("non reconnue" in n for n in notes):
-                try:
-                    from anthropic import Anthropic
-                    from sortclip import director, apply_patch
-                    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-                    ops = director.adjust_with_text(client, edl, instruction)
-                    if ops:
-                        res = apply_patch(edl, ops)
-                        edl2, notes = res.edl, [f"{len(res.applied)} ajustement(s) appliqué(s)"]
-                except Exception as exc:
-                    print(f"[adjust] repli LLM indisponible : {exc}")
+            if edited_events is not None:
+                # Édition visuelle : on remplace la liste d'événements par celle
+                # de la timeline (chaque événement reconstruit et validé ; les
+                # invalides sont ignorés). validate() finit le nettoyage au rendu.
+                from sortclip.edl import (FramingEvent, EmphasisEvent,
+                                          HoldOnSpeakerEvent, SpeedEvent)
+                kinds = {"framing": FramingEvent, "emphasis": EmphasisEvent,
+                         "hold_on_speaker": HoldOnSpeakerEvent, "speed": SpeedEvent}
+                new_events = []
+                for ev in edited_events:
+                    cls = kinds.get((ev or {}).get("op"))
+                    if not cls:
+                        continue
+                    try:
+                        new_events.append(cls(**ev))
+                    except Exception:
+                        continue
+                edl2 = edl.model_copy(update={"events": new_events})
+                notes = [f"{len(new_events)} événement(s) enregistré(s)"]
+            else:
+                edl2, notes = apply_text_adjustment(edl, instruction)
+                # Repli LLM si la consigne n'a pas été comprise par le déterministe.
+                if any("non reconnue" in n for n in notes):
+                    try:
+                        from anthropic import Anthropic
+                        from sortclip import director, apply_patch
+                        client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+                        ops = director.adjust_with_text(client, edl, instruction)
+                        if ops:
+                            res = apply_patch(edl, ops)
+                            edl2, notes = res.edl, [f"{len(res.applied)} ajustement(s) appliqué(s)"]
+                    except Exception as exc:
+                        print(f"[adjust] repli LLM indisponible : {exc}")
 
             supabase.table("clips").update(
                 {"edl": edl2.model_dump(mode="json")}
