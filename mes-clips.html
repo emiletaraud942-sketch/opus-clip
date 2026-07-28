@@ -339,7 +339,7 @@
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) { status.style.color = '#fca5a5'; status.textContent = data.error || 'Échec.'; adjBtn.disabled = false; return; }
-            const baseRev = data.rev ?? Number(adjBtn.getAttribute('data-rev')) || 0;
+            const baseRev = data.rev ?? (Number(adjBtn.getAttribute('data-rev')) || 0);
             status.textContent = ((data.notes || []).join(' · ') || 'Ajustement') + ' — re-rendu en cours…';
             let tries = 0;
             const poll = setInterval(async () => {
