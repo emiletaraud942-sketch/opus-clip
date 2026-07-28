@@ -1352,6 +1352,20 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     enforce_source_caps(plan, yt_duration)
 
                 download_youtube(youtube_url, local_video, allow_proxy=allow_proxy)
+                # On PERSISTE la source téléchargée dans le bucket, pour que les
+                # clips restent AJUSTABLES ensuite (l'ajustement / la timeline
+                # re-rendent depuis l'EDL + la source). Sans ça, la source
+                # n'existe que sur le disque éphémère du worker et disparaît :
+                # tout ajustement échouerait. Le nettoyage périodique des
+                # sources (cleanup_old_sources) s'en occupe après 30 j.
+                try:
+                    with open(local_video, "rb") as f:
+                        supabase.storage.from_(SOURCE_BUCKET).upload(
+                            source_path, f, {"content-type": "video/mp4", "upsert": "true"}
+                        )
+                except Exception as exc:
+                    print(f"[process_video] persistance de la source YouTube échouée "
+                          f"(les clips ne seront pas ajustables) : {exc}")
             else:
                 video_bytes = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
                 Path(local_video).write_bytes(video_bytes)
@@ -1849,6 +1863,22 @@ def billing():
 # Ajustement d'un clip existant (édition par texte, moteur EDL)
 # =====================================================================
 
+def _source_available(supabase, source_path: str | None) -> bool:
+    """Vrai si la vidéo source existe encore dans le bucket (nécessaire au
+    re-rendu). Les clips générés avant la persistance des sources n'en ont
+    plus : on le détecte pour donner un message clair au lieu d'un échec muet."""
+    if not source_path:
+        return False
+    folder = source_path.rsplit("/", 1)[0] if "/" in source_path else ""
+    name = source_path.rsplit("/", 1)[-1]
+    try:
+        entries = supabase.storage.from_(SOURCE_BUCKET).list(folder) or []
+        return any(e.get("name") == name for e in entries)
+    except Exception as exc:
+        print(f"[adjust] vérification source impossible ({exc}) — on tente quand même.")
+        return True   # en cas de doute, on ne bloque pas : le re-rendu tranchera
+
+
 def _rerender_from_edl(edl_dict: dict, edl_words: list, resolution: str,
                        source_local: str, out_path: str, tmp: str):
     """Re-rend un clip à partir d'un EDL stocké + les mots + la source locale."""
@@ -1939,7 +1969,7 @@ def adjust():
 
             supabase = get_supabase_client()
             row = (
-                supabase.table("clips").select("edl,user_id,edl_rev")
+                supabase.table("clips").select("edl,user_id,edl_rev,source_path")
                 .eq("id", clip_id).maybe_single().execute().data
             )
             if not row or row.get("user_id") != user_id:
@@ -1947,6 +1977,14 @@ def adjust():
             if not row.get("edl"):
                 return JSONResponse(
                     {"error": "Ce clip a été généré avant l'édition et ne peut pas être ajusté. Régénère-le pour l'activer."},
+                    status_code=400,
+                )
+            # Le re-rendu a besoin de la vidéo source. Pour les clips anciens
+            # (générés avant la persistance des sources), elle n'existe plus :
+            # on renvoie un message clair et immédiat au lieu d'un échec silencieux.
+            if not _source_available(supabase, row.get("source_path")):
+                return JSONResponse(
+                    {"error": "La vidéo source de ce clip n'est plus disponible : l'ajustement et la timeline nécessitent la vidéo d'origine. Régénère le clip à partir de la vidéo source pour pouvoir l'ajuster."},
                     status_code=400,
                 )
 
