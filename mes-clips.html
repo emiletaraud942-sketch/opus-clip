@@ -116,9 +116,17 @@
     const { data: clips, error } = await supabase
       .from('clips')
       .select('*')
+      .eq('user_id', session.user.id)
       .order('created_at', { ascending: false });
 
-    if (error || !clips || clips.length === 0) {
+    if (error) {
+      // On n'affiche plus « aucun clip » quand c'est en réalité une erreur de
+      // requête : on montre le vrai message pour pouvoir diagnostiquer.
+      const empty = document.getElementById('empty-state');
+      empty.style.display = 'block';
+      empty.textContent = `Impossible de charger tes clips : ${error.message || error}. `
+        + `Réessaie dans un instant ou recharge la page.`;
+    } else if (!clips || clips.length === 0) {
       document.getElementById('empty-state').style.display = 'block';
     } else {
       const rows = clips;
