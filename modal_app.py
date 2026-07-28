@@ -2132,3 +2132,69 @@ def cleanup_old_sources():
             print(f"[cleanup-src] échec suppression lot (on continue) : {exc}")
     print(f"[cleanup-src] {len(to_delete)} source(s) de plus de "
           f"{RETENTION_SOURCE_DAYS} j supprimée(s).")
+
+
+@app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")])
+def reconcile_orphan_clips(user_id: str, dry_run: bool = False):
+    """Récupère les clips « orphelins » : des .mp4 présents dans le bucket
+    « clips » mais SANS ligne correspondante dans la table (insertion échouée
+    après un montage réussi). Recrée une ligne minimale pour chacun afin qu'ils
+    réapparaissent dans « Mes clips ».
+
+    Lancement depuis ta machine :
+        python -m modal run modal_app.py::reconcile_orphan_clips --user-id <UUID>
+    (ajoute --dry-run pour seulement lister sans rien écrire)
+
+    Le <UUID> est l'identifiant de ton compte (Supabase > Authentication >
+    Users > colonne UID, ou en cliquant sur ton utilisateur)."""
+    supabase = get_supabase_client()
+
+    # Fichiers présents dans le stockage pour cet utilisateur.
+    try:
+        files = supabase.storage.from_(CLIPS_BUCKET).list(user_id) or []
+    except Exception as exc:
+        print(f"[reconcile] impossible de lister le bucket clips/{user_id} : {exc}")
+        return {"recovered": 0, "error": str(exc)}
+    stored = [f["name"] for f in files if f.get("name", "").endswith(".mp4")]
+    print(f"[reconcile] {len(stored)} fichier(s) .mp4 dans clips/{user_id}")
+
+    # storage_path déjà référencés en base (à ne pas recréer).
+    existing = (
+        supabase.table("clips").select("storage_path")
+        .eq("user_id", user_id).execute().data or []
+    )
+    known = {r["storage_path"] for r in existing if r.get("storage_path")}
+
+    orphans = [name for name in stored if f"{user_id}/{name}" not in known]
+    print(f"[reconcile] {len(orphans)} clip(s) orphelin(s) à récupérer.")
+    if dry_run:
+        for name in orphans:
+            print(f"[reconcile][dry-run] récupérable : {user_id}/{name}")
+        return {"recovered": 0, "orphans": orphans}
+
+    recovered = 0
+    for name in orphans:
+        storage_path = f"{user_id}/{name}"
+        # On déduit un source_path lisible depuis le nom (…_clipN.mp4).
+        import re as _re
+        base = _re.sub(r"_clip(\d+)\.mp4$", "", name)
+        idx_m = _re.search(r"_clip(\d+)\.mp4$", name)
+        idx = idx_m.group(1) if idx_m else "?"
+        row = {
+            "user_id": user_id,
+            "source_path": f"{user_id}/{base}",
+            "storage_path": storage_path,
+            "title": f"Clip récupéré {idx}",
+            "score": 0,
+            "start_time": 0,
+            "end_time": 0,
+        }
+        try:
+            _insert_clips_resilient(supabase, [row])
+            recovered += 1
+            print(f"[reconcile] récupéré : {storage_path}")
+        except Exception as exc:
+            print(f"[reconcile] échec pour {storage_path} : {exc}")
+
+    print(f"[reconcile] {recovered} clip(s) récupéré(s) pour {user_id}.")
+    return {"recovered": recovered, "orphans": orphans}
