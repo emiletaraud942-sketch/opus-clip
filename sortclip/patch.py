@@ -115,6 +115,22 @@ def apply_text_adjustment(edl: EDL, instruction: str) -> tuple[EDL, list[str]]:
         edl2 = edl2.model_copy(update={"events": new_events})
         notes.append("tous les zooms retirés")
 
+    # --- Resserrer sur le locuteur (bouton A3, cadrage large sur tout le clip) ---
+    if "resserr" in s or "recadre sur le locuteur" in s or "recadrer sur le locuteur" in s:
+        framings = [e for e in edl2.events if e.op == "framing"]
+        if framings:
+            new_events = [
+                e.model_copy(update={"value": "tight"}) if e.op == "framing" else e
+                for e in edl2.events
+            ]
+            edl2 = edl2.model_copy(update={"events": new_events})
+            notes.append("cadrage resserré sur tout le clip")
+        else:
+            from .edl import FramingEvent
+            tight = FramingEvent(t=0.0, value="tight", transition="cut")
+            edl2 = edl2.model_copy(update={"events": [*edl2.events, tight]})
+            notes.append("cadrage resserré ajouté (gros plan)")
+
     # --- Taille des sous-titres ---
     if "sous-titre" in s or "sous titre" in s or "texte" in s:
         if "plus gros" in s or "plus grand" in s or "plus grand" in s:

@@ -258,6 +258,59 @@
         return `<div style="margin-top:8px;font-size:11px;color:${color};">⏳ Expire dans ${hoursLeft} h (plan gratuit : clips gardés 72 h)</div>`;
       }
 
+      // A3 : jusqu'à 2 suggestions dérivées de l'état réel de l'EDL, plus une
+      // toujours proposée. Chaque clic renvoie l'instruction EXACTE reconnue
+      // par apply_text_adjustment (chemin déterministe, sans LLM, gratuit).
+      function suggestButtons(c) {
+        const events = (c.edl && c.edl.events) || [];
+        const framings = events.filter(e => e.op === 'framing');
+        const suggestions = [];
+        if (framings.length >= 3) {
+          suggestions.push({ label: '✂️ Moins de zooms', instruction: 'moins de zooms' });
+        } else if (framings.length === 0 || framings.every(f => f.value === 'wide')) {
+          suggestions.push({ label: '🔍 Resserrer sur le locuteur', instruction: 'resserre sur le locuteur' });
+        }
+        suggestions.push({ label: '🔠 Sous-titres plus gros', instruction: 'sous-titres plus gros' });
+        return suggestions;
+      }
+
+      // Envoie une consigne (texte libre ou suggestion A3 en un clic) à /adjust,
+      // désactive triggerEl pendant l'opération, puis attend le re-rendu en
+      // surveillant edl_rev. Partagé par le bouton « Ajuster » et les
+      // suggestions A3 — même chemin, même garantie (jamais de minutes).
+      async function submitAdjust(clipId, instruction, triggerEl, statusEl, onDoneRev) {
+        triggerEl.disabled = true; statusEl.style.color = '#9ca3af'; statusEl.textContent = 'Envoi…';
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          const res = await fetch(ADJUST_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+            body: JSON.stringify({ clipId, instruction }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { statusEl.style.color = '#fca5a5'; statusEl.textContent = data.error || 'Échec.'; triggerEl.disabled = false; return; }
+          const baseRev = data.rev ?? (Number(clipsById[clipId]?.edl_rev) || 0);
+          statusEl.textContent = ((data.notes || []).join(' · ') || 'Ajustement') + ' — re-rendu en cours…';
+          let tries = 0;
+          const poll = setInterval(async () => {
+            tries += 1;
+            const { data: row } = await supabase.from('clips').select('edl_rev').eq('id', clipId).maybeSingle();
+            if (row && Number(row.edl_rev) > baseRev) {
+              clearInterval(poll); statusEl.style.color = '#86efac';
+              statusEl.textContent = 'Clip mis à jour ✓ — rouvre-le pour voir.';
+              triggerEl.disabled = false;
+              bumpRetouchCounter(clipId, Number(row.edl_rev));
+              if (onDoneRev) onDoneRev(Number(row.edl_rev));
+            } else if (tries > 40) {
+              clearInterval(poll); statusEl.style.color = '#fca5a5';
+              statusEl.textContent = 'Délai dépassé — réessaie.'; triggerEl.disabled = false;
+            }
+          }, 3000);
+        } catch {
+          statusEl.style.color = '#fca5a5'; statusEl.textContent = 'Erreur réseau.'; triggerEl.disabled = false;
+        }
+      }
+
       const grid = document.getElementById('clips-grid');
       grid.innerHTML = rows.map(c => {
         const tags = Array.isArray(c.hashtags) ? c.hashtags : [];
@@ -294,6 +347,13 @@
           ${captionBlock}
           ${c.edl ? `
           <div style="margin-top:12px;padding:10px;background:#0f0f14;border:1px solid #2a2a35;border-radius:10px;">
+            <!-- A3 : suggestions en un clic, dérivées de l'EDL réel (aucun texte à écrire) -->
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+              ${suggestButtons(c).map(b => `
+                <button data-suggest="${c.id}" data-instruction="${esc(b.instruction)}"
+                  style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:700;padding:6px 12px;border-radius:9999px;cursor:pointer;">${b.label}</button>
+              `).join('')}
+            </div>
             <!-- A2 : invitation visible, champ déjà ouvert (pas caché derrière un bouton) -->
             <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:2px;">Ce clip ne vous convient pas ? Dites-le en une phrase.</div>
             <div style="font-size:11px;color:#86efac;margin-bottom:8px;">Les retouches sont illimitées et gratuites.</div>
@@ -406,8 +466,20 @@
           return;
         }
 
-        // Ajustement par texte : envoie la consigne, puis attend la fin du
-        // re-rendu en surveillant edl_rev.
+        // A3 : suggestion en un clic — même chemin déterministe que le champ
+        // texte (l'instruction exacte est reconnue par apply_text_adjustment,
+        // donc jamais de passage par le LLM).
+        const suggestBtn = e.target.closest('[data-suggest]');
+        if (suggestBtn) {
+          const clipId = suggestBtn.getAttribute('data-suggest');
+          const instruction = suggestBtn.getAttribute('data-instruction');
+          const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
+          await submitAdjust(clipId, instruction, suggestBtn, status);
+          return;
+        }
+
+        // Ajustement par texte libre : envoie la consigne, puis attend la fin
+        // du re-rendu en surveillant edl_rev.
         const adjBtn = e.target.closest('[data-adjust]');
         if (adjBtn) {
           const clipId = adjBtn.getAttribute('data-adjust');
@@ -415,35 +487,7 @@
           const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
           const instruction = (input?.value || '').trim();
           if (!instruction) { status.style.color = '#fca5a5'; status.textContent = 'Écris une consigne.'; return; }
-          adjBtn.disabled = true; status.style.color = '#9ca3af'; status.textContent = 'Envoi…';
-          try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const res = await fetch(ADJUST_URL, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-              body: JSON.stringify({ clipId, instruction }),
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) { status.style.color = '#fca5a5'; status.textContent = data.error || 'Échec.'; adjBtn.disabled = false; return; }
-            const baseRev = data.rev ?? (Number(adjBtn.getAttribute('data-rev')) || 0);
-            status.textContent = ((data.notes || []).join(' · ') || 'Ajustement') + ' — re-rendu en cours…';
-            let tries = 0;
-            const poll = setInterval(async () => {
-              tries += 1;
-              const { data: row } = await supabase.from('clips').select('edl_rev').eq('id', clipId).maybeSingle();
-              if (row && Number(row.edl_rev) > baseRev) {
-                clearInterval(poll); status.style.color = '#86efac';
-                status.textContent = 'Clip mis à jour ✓ — rouvre-le pour voir.';
-                adjBtn.disabled = false; adjBtn.setAttribute('data-rev', String(row.edl_rev));
-                bumpRetouchCounter(clipId, Number(row.edl_rev));
-              } else if (tries > 40) {
-                clearInterval(poll); status.style.color = '#fca5a5';
-                status.textContent = 'Délai dépassé — réessaie.'; adjBtn.disabled = false;
-              }
-            }, 3000);
-          } catch {
-            status.style.color = '#fca5a5'; status.textContent = 'Erreur réseau.'; adjBtn.disabled = false;
-          }
+          await submitAdjust(clipId, instruction, adjBtn, status, (rev) => adjBtn.setAttribute('data-rev', String(rev)));
         }
       });
 
