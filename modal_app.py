@@ -886,6 +886,35 @@ def words_in_range(words: list, start: float, end: float) -> list:
     return [w for w in words if w["start"] >= start and w["end"] <= end]
 
 
+def _apply_lexicon(supabase, user_id: str, words: list[dict]) -> list[dict]:
+    """A7 : applique le lexique de corrections mémorisées de l'utilisateur à
+    une transcription fraîche, AVANT sélection/rendu — simple substitution de
+    texte sur les tokens déjà transcrits, garde le timing d'origine. Ne
+    relance JAMAIS la transcription ; n'échoue jamais le pipeline (table pas
+    encore migrée, ou vide)."""
+    import re
+    try:
+        rows = (
+            supabase.table("user_lexicon").select("wrong_word,right_word")
+            .eq("user_id", user_id).execute().data or []
+        )
+    except Exception as exc:
+        print(f"[process_video] lexique utilisateur indisponible (non bloquant) : {exc}")
+        return words
+    if not rows:
+        return words
+    lex = {r["wrong_word"]: r["right_word"] for r in rows}
+    out = []
+    for w in words:
+        text = w.get("word", "")
+        m = re.match(r"^([^\wÀ-ÿ]*)([\wÀ-ÿ'-]*)([^\wÀ-ÿ]*)$", text)
+        if m and m.group(2).strip().lower() in lex:
+            lead, core, trail = m.groups()
+            w = {**w, "word": f"{lead}{lex[core.strip().lower()]}{trail}"}
+        out.append(w)
+    return out
+
+
 # Prompt D (cf. PROMPTS-CLAUDE) : légende + hashtags TikTok. Modèle Haiku,
 # peu coûteux — utilise la clé Anthropic existante, aucun nouvel abonnement.
 TIKTOK_COPY_SYSTEM = """Tu écris la légende TikTok d'un clip déjà monté. Tu n'écris que ce qui l'accompagne.
@@ -1408,6 +1437,11 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             words, full_text = transcribe(local_video)
             if not words:
                 raise RuntimeError("Aucune parole détectée dans cette vidéo — impossible de générer des clips.")
+
+            # A7 : applique le lexique de corrections déjà mémorisées par
+            # l'utilisateur (noms propres, jargon) aux mots transcrits — ne
+            # relance JAMAIS AssemblyAI, simple substitution de texte.
+            words = _apply_lexicon(supabase, user_id, words)
 
             # Signaux objectifs (CPU) : rires, énergie, plans, visage.
             # N'échoue jamais le pipeline (renvoie des listes vides sinon).
@@ -1965,10 +1999,15 @@ def adjust():
 
             clip_id = payload.get("clipId")
             instruction = (payload.get("instruction") or "").strip()
-            edited_events = payload.get("events")           # édition visuelle (timeline)
-            revert_to = payload.get("revertToVersion")       # A4 : retour à une version antérieure
-            if not clip_id or (not instruction and edited_events is None and revert_to is None):
-                return JSONResponse({"error": "clipId et (instruction, events ou revertToVersion) requis"}, status_code=400)
+            edited_events = payload.get("events")            # édition visuelle (timeline)
+            revert_to = payload.get("revertToVersion")        # A4 : retour à une version antérieure
+            word_corrections = payload.get("wordCorrections")  # A7 : correction de sous-titres au mot
+            if not clip_id or (not instruction and edited_events is None
+                               and revert_to is None and word_corrections is None):
+                return JSONResponse(
+                    {"error": "clipId et (instruction, events, revertToVersion ou wordCorrections) requis"},
+                    status_code=400,
+                )
 
             supabase = get_supabase_client()
             row = (
@@ -1993,18 +2032,61 @@ def adjust():
 
             from sortclip import EDL, apply_text_adjustment
             edl = EDL.model_validate(row["edl"])
+            # Mots de SORTIE (utilisés pour les sous-titres) : n'est modifié que
+            # par la branche wordCorrections ; sinon reste celui déjà en base.
+            final_edl_words = row.get("edl_words")
 
-            if revert_to is not None:
-                # A4 : revenir à une version antérieure — on charge son EDL et on
-                # continue le flux normal ; une NOUVELLE version sera créée plus
-                # bas (l'historique n'est jamais réécrit ni détruit).
+            if word_corrections is not None:
+                # A7 : correction de sous-titres au mot. Ne touche NI la
+                # transcription NI l'analyse vision — uniquement le texte d'un
+                # mot déjà transcrit, à son horodatage d'origine inchangé.
+                # L'EDL (cadrages, style) ne change pas.
+                if not row.get("edl_words"):
+                    return JSONResponse(
+                        {"error": "Aucune transcription de sous-titres disponible pour ce clip."},
+                        status_code=400,
+                    )
+                words_copy = [dict(w) for w in row["edl_words"]]
+                applied = 0
+                lexicon_entries = []
+                for corr in word_corrections:
+                    idx = corr.get("index")
+                    new_word = (corr.get("word") or "").strip()
+                    if idx is None or not new_word or not (0 <= idx < len(words_copy)):
+                        continue
+                    original = words_copy[idx].get("word", "")
+                    words_copy[idx] = {**words_copy[idx], "word": new_word}
+                    applied += 1
+                    original_key = original.strip().strip(".,!?…:;»«\"'").lower()
+                    if original_key and original_key != new_word.strip().lower():
+                        lexicon_entries.append((original_key, new_word))
+                edl2 = edl   # l'EDL (cadrages, style) est inchangé
+                final_edl_words = words_copy
+                notes = [f"{applied} mot(s) de sous-titre corrigé(s)"]
+                # A7 : mémorise les corrections pour les prochaines vidéos —
+                # best-effort, ne bloque jamais l'ajustement en cours.
+                for wrong, right in lexicon_entries:
+                    try:
+                        supabase.table("user_lexicon").upsert(
+                            {"user_id": user_id, "wrong_word": wrong, "right_word": right},
+                            on_conflict="user_id,wrong_word",
+                        ).execute()
+                    except Exception as exc:
+                        print(f"[adjust] lexique non enregistré (non bloquant) : {exc}")
+            elif revert_to is not None:
+                # A4 : revenir à une version antérieure — on charge son EDL (et
+                # les mots de sous-titres de CETTE version) et on continue le
+                # flux normal ; une NOUVELLE version sera créée plus bas
+                # (l'historique n'est jamais réécrit ni détruit).
                 version_row = (
-                    supabase.table("clip_versions").select("edl")
+                    supabase.table("clip_versions").select("edl,edl_words")
                     .eq("clip_id", clip_id).eq("version", revert_to).maybe_single().execute().data
                 )
                 if not version_row:
                     return JSONResponse({"error": f"Version {revert_to} introuvable pour ce clip."}, status_code=404)
                 edl2 = EDL.model_validate(version_row["edl"])
+                if version_row.get("edl_words"):
+                    final_edl_words = version_row["edl_words"]
                 notes = [f"Retour à la version {revert_to}"]
             elif edited_events is not None:
                 # Édition visuelle : on remplace la liste d'événements par celle
@@ -2054,13 +2136,13 @@ def adjust():
                 supabase.table("clip_versions").insert({
                     "clip_id": clip_id, "version": next_version, "note": version_note,
                     "edl": edl2.model_dump(mode="json"),
-                    "edl_words": row.get("edl_words"), "edl_resolution": row.get("edl_resolution"),
+                    "edl_words": final_edl_words, "edl_resolution": row.get("edl_resolution"),
                 }).execute()
             except Exception as exc:
                 print(f"[adjust] historique de version non enregistré (non bloquant) : {exc}")
 
             supabase.table("clips").update(
-                {"edl": edl2.model_dump(mode="json")}
+                {"edl": edl2.model_dump(mode="json"), "edl_words": final_edl_words}
             ).eq("id", clip_id).execute()
             rerender_clip.spawn(user_id=user_id, clip_id=clip_id)
 
