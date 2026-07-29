@@ -93,12 +93,14 @@ ENABLE_AUTO_DIRECTOR = False
 TEST_ACCOUNT_EMAILS = {"emiletaraud942@gmail.com"}
 
 ALLOWED_ORIGINS = [
-    "https://opus-clip-alpha.vercel.app",
+    "https://sortclip.fr",
+    "https://www.sortclip.fr",
+    "https://opus-clip-alpha.vercel.app",   # conservé le temps de la bascule DNS
     "http://localhost:3000",
     "http://127.0.0.1:5500",
 ]
 
-SITE_URL = "https://opus-clip-alpha.vercel.app"
+SITE_URL = "https://sortclip.fr"
 
 # Correspondance entre les produits Stripe (créés dans le dashboard) et les
 # plans internes de Sortclip.
