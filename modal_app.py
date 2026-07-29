@@ -1965,13 +1965,14 @@ def adjust():
 
             clip_id = payload.get("clipId")
             instruction = (payload.get("instruction") or "").strip()
-            edited_events = payload.get("events")   # édition visuelle (timeline)
-            if not clip_id or (not instruction and edited_events is None):
-                return JSONResponse({"error": "clipId et (instruction ou events) requis"}, status_code=400)
+            edited_events = payload.get("events")           # édition visuelle (timeline)
+            revert_to = payload.get("revertToVersion")       # A4 : retour à une version antérieure
+            if not clip_id or (not instruction and edited_events is None and revert_to is None):
+                return JSONResponse({"error": "clipId et (instruction, events ou revertToVersion) requis"}, status_code=400)
 
             supabase = get_supabase_client()
             row = (
-                supabase.table("clips").select("edl,user_id,edl_rev,source_path")
+                supabase.table("clips").select("edl,edl_words,edl_resolution,user_id,edl_rev,source_path")
                 .eq("id", clip_id).maybe_single().execute().data
             )
             if not row or row.get("user_id") != user_id:
@@ -1993,7 +1994,19 @@ def adjust():
             from sortclip import EDL, apply_text_adjustment
             edl = EDL.model_validate(row["edl"])
 
-            if edited_events is not None:
+            if revert_to is not None:
+                # A4 : revenir à une version antérieure — on charge son EDL et on
+                # continue le flux normal ; une NOUVELLE version sera créée plus
+                # bas (l'historique n'est jamais réécrit ni détruit).
+                version_row = (
+                    supabase.table("clip_versions").select("edl")
+                    .eq("clip_id", clip_id).eq("version", revert_to).maybe_single().execute().data
+                )
+                if not version_row:
+                    return JSONResponse({"error": f"Version {revert_to} introuvable pour ce clip."}, status_code=404)
+                edl2 = EDL.model_validate(version_row["edl"])
+                notes = [f"Retour à la version {revert_to}"]
+            elif edited_events is not None:
                 # Édition visuelle : on remplace la liste d'événements par celle
                 # de la timeline (chaque événement reconstruit et validé ; les
                 # invalides sont ignorés). validate() finit le nettoyage au rendu.
@@ -2026,6 +2039,25 @@ def adjust():
                             edl2, notes = res.edl, [f"{len(res.applied)} ajustement(s) appliqué(s)"]
                     except Exception as exc:
                         print(f"[adjust] repli LLM indisponible : {exc}")
+
+            # A4 : historique versionné — chaque retouche (texte, timeline, ou
+            # retour arrière) ajoute une NOUVELLE ligne, jamais une réécriture.
+            # Best-effort : une migration non appliquée ne doit pas bloquer
+            # l'ajustement lui-même.
+            try:
+                existing = (
+                    supabase.table("clip_versions").select("version")
+                    .eq("clip_id", clip_id).order("version", desc=True).limit(1).execute().data
+                )
+                next_version = (existing[0]["version"] if existing else 0) + 1
+                version_note = instruction if instruction else (notes[0] if notes else "Ajustement")
+                supabase.table("clip_versions").insert({
+                    "clip_id": clip_id, "version": next_version, "note": version_note,
+                    "edl": edl2.model_dump(mode="json"),
+                    "edl_words": row.get("edl_words"), "edl_resolution": row.get("edl_resolution"),
+                }).execute()
+            except Exception as exc:
+                print(f"[adjust] historique de version non enregistré (non bloquant) : {exc}")
 
             supabase.table("clips").update(
                 {"edl": edl2.model_dump(mode="json")}

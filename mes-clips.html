@@ -278,14 +278,16 @@
       // désactive triggerEl pendant l'opération, puis attend le re-rendu en
       // surveillant edl_rev. Partagé par le bouton « Ajuster » et les
       // suggestions A3 — même chemin, même garantie (jamais de minutes).
-      async function submitAdjust(clipId, instruction, triggerEl, statusEl, onDoneRev) {
+      // `body` : { instruction } pour du texte, { events } pour la timeline,
+      // ou { revertToVersion } pour un retour arrière (A4).
+      async function submitAdjust(clipId, body, triggerEl, statusEl, onDoneRev) {
         triggerEl.disabled = true; statusEl.style.color = '#9ca3af'; statusEl.textContent = 'Envoi…';
         try {
           const { data: { session } } = await supabase.auth.getSession();
           const res = await fetch(ADJUST_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-            body: JSON.stringify({ clipId, instruction }),
+            body: JSON.stringify({ clipId, ...body }),
           });
           const data = await res.json().catch(() => ({}));
           if (!res.ok) { statusEl.style.color = '#fca5a5'; statusEl.textContent = data.error || 'Échec.'; triggerEl.disabled = false; return; }
@@ -310,6 +312,55 @@
           statusEl.style.color = '#fca5a5'; statusEl.textContent = 'Erreur réseau.'; triggerEl.disabled = false;
         }
       }
+
+      // A4 : panneau d'historique — id du clip dont le panneau est ouvert
+      // (sert de cible pour Ctrl/Cmd+Z).
+      let activeHistoryClipId = null;
+
+      async function renderHistoryPanel(clipId, panel) {
+        panel.innerHTML = '<div style="font-size:11px;color:#6b7280;padding:6px;">Chargement…</div>';
+        const { data: versions, error } = await supabase
+          .from('clip_versions').select('version,note,created_at')
+          .eq('clip_id', clipId).order('version', { ascending: false });
+        if (error) {
+          panel.innerHTML = '<div style="font-size:11px;color:#9ca3af;padding:6px;">Historique indisponible pour ce clip.</div>';
+          return;
+        }
+        if (!versions || versions.length === 0) {
+          panel.innerHTML = '<div style="font-size:11px;color:#6b7280;padding:6px;">Aucune retouche enregistrée pour l\'instant — le clip est à sa version d\'origine.</div>';
+          return;
+        }
+        panel.innerHTML = versions.map((v, i) => `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 4px;${i > 0 ? 'border-top:1px solid #2a2a35;' : ''}">
+            <div style="min-width:0;">
+              <div style="font-size:11px;font-weight:700;color:#fff;">Version ${v.version}${i === 0 ? ' (actuelle)' : ''}</div>
+              <div style="font-size:10px;color:#9ca3af;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(v.note || 'Ajustement')} · ${new Date(v.created_at).toLocaleString('fr-FR')}</div>
+            </div>
+            ${i > 0 ? `<button data-revert="${clipId}" data-version="${v.version}" style="flex-shrink:0;background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:10px;font-weight:700;padding:5px 10px;border-radius:9999px;cursor:pointer;">Revenir à cette version</button>` : ''}
+          </div>
+        `).join('');
+      }
+
+      // Ctrl/Cmd+Z : annule la dernière retouche du clip dont l'historique est
+      // ouvert, en revenant à l'avant-dernière version (crée une nouvelle
+      // version, ne détruit rien).
+      document.addEventListener('keydown', async (e) => {
+        const isUndo = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z';
+        if (!isUndo || !activeHistoryClipId) return;
+        e.preventDefault();
+        const clipId = activeHistoryClipId;
+        const { data: versions } = await supabase
+          .from('clip_versions').select('version')
+          .eq('clip_id', clipId).order('version', { ascending: false }).limit(2);
+        if (!versions || versions.length < 2) return;   // rien à annuler
+        const previous = versions[1].version;
+        const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
+        const panel = grid.querySelector(`[data-history-panel="${clipId}"]`);
+        const dummyBtn = { disabled: false };   // Ctrl+Z n'a pas de bouton associé
+        await submitAdjust(clipId, { revertToVersion: previous }, dummyBtn, status, () => {
+          if (panel) renderHistoryPanel(clipId, panel);
+        });
+      });
 
       const grid = document.getElementById('clips-grid');
       grid.innerHTML = rows.map(c => {
@@ -364,12 +415,16 @@
                 style="background:#8b5cf6;color:#fff;border:0;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">Ajuster</button>
               <button data-edit="${c.id}"
                 style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">✏️ Timeline</button>
+              <button data-history="${c.id}"
+                style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">🕘 Historique</button>
               <span data-adjust-status="${c.id}" style="font-size:11px;color:#9ca3af;"></span>
             </div>
             <!-- A1 : compteur de retouches gratuites de CE clip, en permanence -->
             <div data-retouch-counter style="margin-top:8px;font-size:11px;color:#6b7280;">
               <strong style="color:#d1d5db;">${c.edl_rev ?? 0}</strong> retouche${(c.edl_rev ?? 0) === 1 ? '' : 's'} — <strong style="color:#86efac;">0 minute consommée</strong>
             </div>
+            <!-- A4 : panneau d'historique des versions, replié par défaut -->
+            <div data-history-panel="${c.id}" style="display:none;margin-top:10px;background:#17171d;border:1px solid #2a2a35;border-radius:8px;padding:8px;max-height:220px;overflow-y:auto;"></div>
             <div data-editor="${c.id}" style="display:none;margin-top:10px;"></div>
           </div>` : ''}
         </div>`;
@@ -474,7 +529,7 @@
           const clipId = suggestBtn.getAttribute('data-suggest');
           const instruction = suggestBtn.getAttribute('data-instruction');
           const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
-          await submitAdjust(clipId, instruction, suggestBtn, status);
+          await submitAdjust(clipId, { instruction }, suggestBtn, status);
           return;
         }
 
@@ -487,7 +542,37 @@
           const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
           const instruction = (input?.value || '').trim();
           if (!instruction) { status.style.color = '#fca5a5'; status.textContent = 'Écris une consigne.'; return; }
-          await submitAdjust(clipId, instruction, adjBtn, status, (rev) => adjBtn.setAttribute('data-rev', String(rev)));
+          await submitAdjust(clipId, { instruction }, adjBtn, status, (rev) => adjBtn.setAttribute('data-rev', String(rev)));
+          return;
+        }
+
+        // A4 : ouvrir/fermer le panneau d'historique des versions.
+        const historyBtn = e.target.closest('[data-history]');
+        if (historyBtn) {
+          const clipId = historyBtn.getAttribute('data-history');
+          const panel = grid.querySelector(`[data-history-panel="${clipId}"]`);
+          if (panel.style.display === 'none') {
+            panel.style.display = 'block';
+            activeHistoryClipId = clipId;
+            await renderHistoryPanel(clipId, panel);
+          } else {
+            panel.style.display = 'none';
+            if (activeHistoryClipId === clipId) activeHistoryClipId = null;
+          }
+          return;
+        }
+
+        // A4 : « Revenir à cette version » — crée une NOUVELLE version copiant
+        // l'ancienne (l'historique n'est jamais détruit), sans consommer de minute.
+        const revertBtn = e.target.closest('[data-revert]');
+        if (revertBtn) {
+          const clipId = revertBtn.getAttribute('data-revert');
+          const version = Number(revertBtn.getAttribute('data-version'));
+          const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
+          await submitAdjust(clipId, { revertToVersion: version }, revertBtn, status, () => {
+            const panel = grid.querySelector(`[data-history-panel="${clipId}"]`);
+            if (panel) renderHistoryPanel(clipId, panel);
+          });
         }
       });
 
