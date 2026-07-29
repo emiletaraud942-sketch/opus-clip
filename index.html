@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-title" content="Sortclip">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<meta name="description" content="Sortclip transforme vos podcasts, streams et webinars en clips courts prêts pour TikTok, Reels et Shorts, grâce à l'IA.">
+<meta name="description" content="Sortclip transforme vos podcasts, streams et webinars en clips courts pour TikTok, Reels et Shorts — et corriger un clip ne consomme jamais votre quota.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect x=%274%27 y=%274%27 width=%2756%27 height=%2756%27 rx=%2716%27 fill=%27%237c3aed%27/%3E%3Cpath d=%27M22 20 L22 44 L42 32 Z%27 fill=%27%230f0f14%27/%3E%3C/svg%3E">
 <title>Sortclip</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -36,8 +36,8 @@
       <div style="display:inline-flex;align-items:center;gap:6px;background:rgba(244,63,142,.12);border:1px solid rgba(244,63,142,.35);color:#f9a8c9;font-size:12px;font-weight:600;padding:6px 14px;border-radius:9999px;margin-bottom:24px;">
         <span style="width:6px;height:6px;border-radius:50%;background:#f43f8e;"></span> IA de repurposing vidéo
       </div>
-      <h1 style="font-family:'Space Grotesk',sans-serif;font-size:46px;font-weight:700;line-height:1.15;margin:0 0 20px;">Une longue vidéo. Des clips prêts à poster, en 1 minute.</h1>
-      <p style="font-size:16px;color:#9ca3af;margin:0 0 32px;">Importez votre podcast, stream ou webinar. Notre IA repère les meilleurs moments, sous-titre et recadre automatiquement pour TikTok, Reels et Shorts.</p>
+      <h1 style="font-family:'Space Grotesk',sans-serif;font-size:44px;font-weight:700;line-height:1.15;margin:0 0 20px;">Le seul outil de clipping où corriger ne coûte rien.</h1>
+      <p style="font-size:16px;color:#9ca3af;margin:0 0 32px;">Importez votre podcast, stream ou webinar. Notre IA repère les meilleurs moments, sous-titre et recadre automatiquement. Un clip ne convient pas ? Une phrase suffit pour le corriger — gratuitement, sans jamais retoucher à votre quota.</p>
 
       <label for="video-upload" style="display:flex;align-items:center;gap:12px;background:#17171d;border:1px dashed #3a3a48;border-radius:16px;padding:18px 20px;margin-bottom:12px;cursor:pointer;">
         <div style="width:36px;height:36px;background:rgba(244,63,142,.12);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">⬆️</div>
@@ -63,7 +63,7 @@
         <input id="youtube-url" style="flex:1;background:transparent;border:none;color:#d1d5db;font-size:14px;outline:none;" placeholder="Colle le lien de ta propre vidéo YouTube" />
         <button id="youtube-submit" style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-weight:700;font-size:13px;padding:11px 22px;border-radius:9999px;white-space:nowrap;cursor:pointer;">Utiliser ce lien</button>
       </div>
-      <div style="font-size:11px;color:#6b7280;line-height:1.6;">Réservé aux vidéos dont vous êtes propriétaire ou titulaire des droits (ex. votre propre podcast). Voir nos <a href="cgu.html" style="color:#9ca3af;text-decoration:underline;">Conditions d'utilisation</a>.</div>
+      <div style="font-size:11px;color:#6b7280;line-height:1.6;">Import par lien : <strong style="color:#9ca3af;">expérimental, selon disponibilité de la plateforme source</strong>. Réservé aux vidéos dont vous êtes propriétaire ou titulaire des droits (ex. votre propre podcast). Voir nos <a href="cgu.html" style="color:#9ca3af;text-decoration:underline;">Conditions d'utilisation</a>.</div>
 
       <!-- Message spécifique au blocage anti-robot YouTube -->
       <div id="youtube-error" style="display:none;margin-top:12px;background:rgba(244,63,94,.08);border:1px solid rgba(244,63,94,.35);border-radius:12px;padding:12px 14px;font-size:12px;color:#fca5a5;line-height:1.6;"></div>
@@ -115,6 +115,38 @@
       <div id="hero-carousel" style="display:flex;gap:16px;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;-webkit-overflow-scrolling:touch;"></div>
       <div id="hero-dots" style="display:flex;justify-content:center;gap:7px;margin-top:12px;"></div>
       <div style="font-size:10px;color:#6b7280;margin-top:8px;text-align:center;">Fais défiler les clips · vues à titre indicatif.</div>
+    </div>
+  </div>
+</section>
+
+<!-- Mécanisme central du produit : corriger ne coûte rien -->
+<section style="width:100%;background:#0f0f14;font-family:'Inter',sans-serif;color:#fff;padding:8px 32px 40px;box-sizing:border-box;">
+  <div style="max-width:1240px;margin:0 auto;">
+    <div style="text-align:center;max-width:640px;margin:0 auto 28px;">
+      <h2 style="font-family:'Space Grotesk',sans-serif;font-size:26px;font-weight:700;margin:0 0 8px;">Ici, une IA qui se trompe ne vous coûte rien</h2>
+      <p style="font-size:14px;color:#9ca3af;margin:0;">Ailleurs, corriger un clip raté consomme un nouveau crédit. Chez Sortclip, c'est gratuit et illimité.</p>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;max-width:980px;margin:0 auto;">
+      <div style="background:#17171d;border:1px solid #2a2a35;border-radius:14px;padding:18px;text-align:center;">
+        <div style="font-size:24px;margin-bottom:8px;">🎬</div>
+        <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:4px;">1. Clip raté</div>
+        <div style="font-size:11px;color:#9ca3af;">Cadrage trop large, sous-titres illisibles…</div>
+      </div>
+      <div style="background:#17171d;border:1px solid #2a2a35;border-radius:14px;padding:18px;text-align:center;">
+        <div style="font-size:24px;margin-bottom:8px;">💬</div>
+        <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:4px;">2. Une phrase</div>
+        <div style="font-size:11px;color:#9ca3af;">« Resserre sur le visage »</div>
+      </div>
+      <div style="background:#17171d;border:1px solid #2a2a35;border-radius:14px;padding:18px;text-align:center;">
+        <div style="font-size:24px;margin-bottom:8px;">✨</div>
+        <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:4px;">3. Clip corrigé</div>
+        <div style="font-size:11px;color:#9ca3af;">Re-rendu en quelques secondes</div>
+      </div>
+      <div style="background:linear-gradient(135deg,#1c1430,#17171d);border:1px solid #3a2a55;border-radius:14px;padding:18px;text-align:center;">
+        <div style="font-size:24px;margin-bottom:8px;">🔒</div>
+        <div style="font-size:12px;font-weight:700;color:#c4b5fd;margin-bottom:4px;">4. Quota inchangé</div>
+        <div style="font-size:11px;color:#9ca3af;">0 minute consommée</div>
+      </div>
     </div>
   </div>
 </section>
