@@ -115,6 +115,7 @@ export function renderNav({ active = '', ctaVariant = 'default' } = {}) {
       <button class="nav-toggle" id="nav-toggle" aria-label="Ouvrir le menu">☰</button>
       <div class="nav-links" id="nav-links">
         ${linksHtml}
+        <a href="#" id="nav-install" class="nav-link" style="display:none;">⬇ Installer l'app</a>
         <div class="nav-auth" id="auth-area">${ctaHtml}</div>
       </div>
     </nav>
@@ -123,6 +124,26 @@ export function renderNav({ active = '', ctaVariant = 'default' } = {}) {
   document.getElementById('nav-toggle').addEventListener('click', () => {
     document.getElementById('nav-links').classList.toggle('nav-links-open');
   });
+
+  // Bouton « Installer l'app » : visible seulement si l'installation est
+  // possible (Android : prompt capturé par install-prompt.js ; iOS : Safari
+  // hors mode app). S'appuie sur l'API window.scInstall.
+  const installLink = document.getElementById('nav-install');
+  function updateInstall() {
+    const api = window.scInstall;
+    const show = !!api && !api.standalone && (api.canPrompt || api.ios);
+    installLink.style.display = show ? '' : 'none';
+  }
+  installLink.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const api = window.scInstall;
+    if (!api) return;
+    if (api.canPrompt) await api.promptInstall();
+    else if (api.ios) api.iosHint();
+  });
+  updateInstall();
+  document.addEventListener('sc-install-changed', updateInstall);
+  window.addEventListener('load', updateInstall);
 
   // État de connexion : mise à jour immédiate + à chaque changement d'auth.
   refreshNavAuth();
