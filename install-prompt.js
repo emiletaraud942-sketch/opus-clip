@@ -61,7 +61,10 @@ function banner(innerHTML) {
   document.body.appendChild(el);
   return el;
 }
-const icon = `<img src="/icon-192.png" alt="" width="40" height="40" style="border-radius:10px;flex-shrink:0;">`;
+// Style INLINE (et non des attributs width/height) pour ne pas être écrasé par
+// une règle CSS globale « img { width:100%;height:100% } » présente sur
+// certaines pages, qui gonflait l'icône en plein écran.
+const icon = `<img src="/icon-192.png" alt="" style="width:40px;height:40px;min-width:40px;border-radius:10px;object-fit:cover;flex-shrink:0;">`;
 const closeBtn = `<button data-close aria-label="Fermer" style="background:none;border:0;color:#6b7280;font-size:20px;line-height:1;cursor:pointer;padding:0 2px;flex-shrink:0;">×</button>`;
 function wireClose(el) {
   el.querySelector('[data-close]').addEventListener('click', () => { remember(); el.remove(); });
