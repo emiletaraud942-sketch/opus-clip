@@ -40,6 +40,11 @@
       Les quotas sont exprimés en <strong style="color:#d1d5db;">minutes de vidéo source analysées</strong> — vous payez ce que vous traitez réellement, pas un nombre de vidéos arbitraire.
     </p>
 
+    <!-- A1 : cumul des retouches gratuites, 2e emplacement (fin d'essai / page tarifs) -->
+    <div id="retouches-summary" style="display:none;max-width:560px;margin:-16px auto 32px;background:linear-gradient(135deg,#141019,#17171d);border:1px solid #3a2a55;border-radius:14px;padding:14px 18px;text-align:center;font-size:13px;color:#d1d5db;">
+      Vous avez effectué <strong id="retouches-summary-count" style="color:#86efac;">—</strong> retouches. Elles n'ont consommé <strong style="color:#fff;">aucune minute</strong> de votre quota.
+    </div>
+
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;margin-bottom:40px;">
       <div class="plan" style="background:#17171d;border:1px solid #2a2a35;border-radius:20px;padding:28px;transition:border-color .2s;">
         <div style="font-size:14px;color:#9ca3af;font-weight:600;margin-bottom:8px;">Gratuit</div>
@@ -138,6 +143,22 @@
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const errorBox = document.getElementById('billing-error');
+
+  // A1 : cumul des retouches gratuites déjà effectuées (2e emplacement, en
+  // plus de « Mes clips »). edl_rev est incrémenté à chaque re-rendu réussi —
+  // aucune requête supplémentaire lourde, juste une somme côté client.
+  (async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      const { data: clips } = await supabase.from('clips').select('edl_rev').eq('user_id', session.user.id);
+      const total = (clips || []).reduce((s, c) => s + (Number(c.edl_rev) || 0), 0);
+      if (total > 0) {
+        document.getElementById('retouches-summary-count').textContent = String(total);
+        document.getElementById('retouches-summary').style.display = 'block';
+      }
+    } catch (e) { console.warn('Cumul des retouches indisponible :', e); }
+  })();
 
   function showBillingError(message) {
     errorBox.textContent = message;

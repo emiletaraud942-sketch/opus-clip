@@ -38,8 +38,8 @@
       <a href="index.html" style="background:#f43f8e;color:#fff;font-weight:700;font-size:13px;padding:10px 20px;border-radius:9999px;">+ Importer une vidéo</a>
     </div>
 
-    <!-- Compteur d'usage : minutes d'abonnement + crédits -->
-    <div id="usage-widget" style="display:none;background:#17171d;border:1px solid #2a2a35;border-radius:14px;padding:16px 20px;margin-bottom:32px;font-size:13px;color:#d1d5db;">
+    <!-- Compteur d'usage : minutes d'abonnement + crédits + retouches -->
+    <div id="usage-widget" style="display:none;background:#17171d;border:1px solid #2a2a35;border-radius:14px;padding:16px 20px;margin-bottom:16px;font-size:13px;color:#d1d5db;">
       <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:center;">
         <div>
           <div style="color:#6b7280;font-size:12px;">Minutes d'abonnement</div>
@@ -50,9 +50,36 @@
           <div id="credit-minutes" style="font-size:20px;font-weight:700;color:#c4b5fd;font-family:'Space Grotesk',sans-serif;">—</div>
           <div id="credit-expiry" style="font-size:11px;color:#6b7280;"></div>
         </div>
+        <div id="retouches-block" style="display:none;">
+          <div style="color:#6b7280;font-size:12px;">Retouches effectuées</div>
+          <div id="retouches-count" style="font-size:20px;font-weight:700;color:#86efac;font-family:'Space Grotesk',sans-serif;">—</div>
+          <div style="font-size:11px;color:#6b7280;">0 minute consommée</div>
+        </div>
         <a href="tarifs.html" style="margin-left:auto;color:#f9a8c9;font-size:13px;text-decoration:underline;">Recharger / changer de plan</a>
       </div>
     </div>
+
+    <!-- A8 : garantie explicite, toujours visible à côté du quota -->
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:32px;font-size:12px;color:#9ca3af;">
+      <span style="color:#86efac;">🔒</span>
+      <span>Les retouches ne consomment <strong style="color:#fff;">jamais</strong> de minutes.</span>
+      <span data-tooltip-toggle tabindex="0" style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#2a2a35;color:#9ca3af;font-size:10px;font-weight:700;cursor:help;">?
+        <span style="display:none;position:absolute;bottom:22px;left:0;width:260px;background:#20202a;border:1px solid #3a3a48;border-radius:10px;padding:10px 12px;font-size:11px;color:#d1d5db;line-height:1.5;z-index:20;font-weight:400;text-align:left;">
+          <strong style="color:#fff;">Consomme des minutes :</strong> l'import d'une vidéo source, une seule fois.<br>
+          <strong style="color:#86efac;">Ne consomme rien :</strong> les retouches, les aperçus, les re-rendus et les corrections de sous-titres — autant de fois que tu veux.
+        </span>
+      </span>
+    </div>
+    <script>
+      document.querySelectorAll('[data-tooltip-toggle]').forEach((t) => {
+        const tip = t.querySelector('span');
+        const show = () => { tip.style.display = 'block'; };
+        const hide = () => { tip.style.display = 'none'; };
+        t.addEventListener('mouseenter', show); t.addEventListener('mouseleave', hide);
+        t.addEventListener('focus', show); t.addEventListener('blur', hide);
+        t.addEventListener('click', (e) => { e.preventDefault(); tip.style.display = tip.style.display === 'block' ? 'none' : 'block'; });
+      });
+    </script>
 
     <div id="not-logged" style="display:none;text-align:center;padding:60px 20px;color:#9ca3af;">
       <p style="margin:0 0 16px;">Connecte-toi pour voir tes clips.</p>
@@ -182,6 +209,34 @@
       const safeName = (t) => (String(t || 'clip').replace(/[^\w-]+/g, '_').slice(0, 40) || 'clip') + '.mp4';
       const clipsById = Object.fromEntries(rows.map((c) => [c.id, c]));
 
+      // A1 : compteur de retouches gratuites, cumulé sur tous les clips.
+      // edl_rev est déjà incrémenté à chaque re-rendu réussi (texte ou
+      // timeline) — c'est exactement le nombre de retouches de ce clip,
+      // stocké en base, donc persistant après rechargement/reconnexion.
+      let totalRetouches = rows.reduce((s, c) => s + (Number(c.edl_rev) || 0), 0);
+      function renderRetouchesTotal() {
+        if (totalRetouches <= 0) return;
+        document.getElementById('retouches-count').textContent = String(totalRetouches);
+        document.getElementById('retouches-block').style.display = 'block';
+      }
+      renderRetouchesTotal();
+
+      // Met à jour, sans recharger la page, le compteur du clip ET le cumul
+      // global après une retouche réussie (texte ou timeline).
+      function bumpRetouchCounter(clipId, newRev) {
+        const prevRev = Number(clipsById[clipId]?.edl_rev) || 0;
+        const delta = Math.max(0, Number(newRev) - prevRev);
+        if (clipsById[clipId]) clipsById[clipId].edl_rev = newRev;
+        totalRetouches += delta;
+        renderRetouchesTotal();
+        // Le compteur par clip vit dans la même carte que l'éditeur (frère direct).
+        const editorBox = grid.querySelector(`[data-editor="${clipId}"]`);
+        const card = editorBox?.parentElement?.querySelector('[data-retouch-counter]');
+        if (card) {
+          card.innerHTML = `<strong style="color:#d1d5db;">${newRev}</strong> retouche${newRev === 1 ? '' : 's'} — <strong style="color:#86efac;">0 minute consommée</strong>`;
+        }
+      }
+
       // Génère un lien signé FRAIS au moment du clic (les liens signés
       // expirent : les pré-générer au chargement provoque des « InvalidJWT ».
       async function freshUrl(path, downloadName) {
@@ -239,20 +294,44 @@
           ${captionBlock}
           ${c.edl ? `
           <div style="margin-top:12px;padding:10px;background:#0f0f14;border:1px solid #2a2a35;border-radius:10px;">
-            <div style="font-size:11px;color:#9ca3af;margin-bottom:6px;">Ajuster ce clip (texte)</div>
+            <!-- A2 : invitation visible, champ déjà ouvert (pas caché derrière un bouton) -->
+            <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:2px;">Ce clip ne vous convient pas ? Dites-le en une phrase.</div>
+            <div style="font-size:11px;color:#86efac;margin-bottom:8px;">Les retouches sont illimitées et gratuites.</div>
             <input data-adjust-input="${c.id}" placeholder="ex. « moins de zooms », « sous-titres plus gros », « en jaune »"
               style="width:100%;box-sizing:border-box;background:#17171d;border:1px solid #2a2a35;color:#fff;font-size:12px;padding:8px;border-radius:8px;" />
-            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
+            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">
               <button data-adjust="${c.id}" data-rev="${c.edl_rev ?? 0}"
                 style="background:#8b5cf6;color:#fff;border:0;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">Ajuster</button>
               <button data-edit="${c.id}"
                 style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">✏️ Timeline</button>
               <span data-adjust-status="${c.id}" style="font-size:11px;color:#9ca3af;"></span>
             </div>
+            <!-- A1 : compteur de retouches gratuites de CE clip, en permanence -->
+            <div data-retouch-counter style="margin-top:8px;font-size:11px;color:#6b7280;">
+              <strong style="color:#d1d5db;">${c.edl_rev ?? 0}</strong> retouche${(c.edl_rev ?? 0) === 1 ? '' : 's'} — <strong style="color:#86efac;">0 minute consommée</strong>
+            </div>
             <div data-editor="${c.id}" style="display:none;margin-top:10px;"></div>
           </div>` : ''}
         </div>`;
       }).join('');
+
+      // A2 : si aucune retouche n'a été faite 30 s après l'affichage d'un clip
+      // sans EDL retouché, on relance discrètement l'invitation (léger surlignage
+      // du champ, une seule fois).
+      rows.forEach((c) => {
+        if (!c.edl || (c.edl_rev ?? 0) > 0) return;
+        const input = grid.querySelector(`[data-adjust-input="${c.id}"]`);
+        if (!input) return;
+        setTimeout(() => {
+          if (input.value || input.dataset.nudged) return;
+          input.dataset.nudged = '1';
+          input.style.transition = 'box-shadow .3s, border-color .3s';
+          input.style.borderColor = '#8b5cf6';
+          input.style.boxShadow = '0 0 0 3px rgba(139,92,246,.25)';
+          input.focus({ preventScroll: true });
+          setTimeout(() => { input.style.borderColor = '#2a2a35'; input.style.boxShadow = 'none'; }, 2200);
+        }, 30000);
+      });
 
       grid.addEventListener('click', async (e) => {
         const copyBtn = e.target.closest('[data-copy]');
@@ -356,6 +435,7 @@
                 clearInterval(poll); status.style.color = '#86efac';
                 status.textContent = 'Clip mis à jour ✓ — rouvre-le pour voir.';
                 adjBtn.disabled = false; adjBtn.setAttribute('data-rev', String(row.edl_rev));
+                bumpRetouchCounter(clipId, Number(row.edl_rev));
               } else if (tries > 40) {
                 clearInterval(poll); status.style.color = '#fca5a5';
                 status.textContent = 'Délai dépassé — réessaie.'; adjBtn.disabled = false;
@@ -482,6 +562,7 @@
               if (row && Number(row.edl_rev) > baseRev) {
                 clearInterval(poll); status.style.color = '#86efac';
                 status.textContent = 'Mis à jour ✓ — rouvre le clip.';
+                bumpRetouchCounter(clipId, Number(row.edl_rev));
               } else if (tries > 40) {
                 clearInterval(poll); status.style.color = '#fca5a5'; status.textContent = 'Délai dépassé.';
               }
