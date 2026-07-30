@@ -100,29 +100,48 @@ def _dialogue(start: float, end: float, text: str) -> str:
 def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
     """Écrit un fichier .ass depuis des mots en TEMPS SORTIE. Retourne le chemin.
 
-    - style "plain"  : couleur uniforme, mots groupés par `words_per_line`.
-    - style "karaoke": mot-à-mot, surbrillance progressive via \\k.
+    - style "karaoke": mot-à-mot, surbrillance progressive via \\k — groupés
+      par `words_per_line`, INCHANGÉ (le découpage linguistique H2 ne
+      s'applique qu'au style "plain", où des lignes de plusieurs mots sont
+      réellement composées ; en karaoké chaque mot s'affiche isolément, le
+      problème de coupure de ligne ne se pose pas de la même façon).
+    - style "plain"  : H2 — découpage linguistique français (jamais entre
+      déterminant et nom, jamais après une forme élidée, "ne...pas" toujours
+      ensemble, jamais un mot d'1-2 lettres isolé en fin de ligne), deux
+      lignes par bloc maximum, typographie française (espaces insécables).
     """
     from pathlib import Path
+    from .subtitles_fr import break_lines_fr, group_into_blocks, apply_french_typography
 
     lines = [_ass_header(captions, canvas)]
-    wpl = captions.words_per_line
-    groups = [words_out[i:i + wpl] for i in range(0, len(words_out), wpl)]
 
-    for g in groups:
-        if not g:
-            continue
-        start = g[0]["start"]
-        end = g[-1]["end"]
-        if captions.style == "karaoke":
+    if captions.style == "karaoke":
+        wpl = captions.words_per_line
+        groups = [words_out[i:i + wpl] for i in range(0, len(words_out), wpl)]
+        for g in groups:
+            if not g:
+                continue
+            start = g[0]["start"]
+            end = g[-1]["end"]
             chunks = []
             for w in g:
                 cs = max(1, int(round((w["end"] - w["start"]) * 100)))
                 chunks.append(f"{{\\k{cs}}}{w['word']}")
-            text = " ".join(chunks)
-        else:
-            text = " ".join(w["word"] for w in g)
-        lines.append(_dialogue(start, end, text))
+            lines.append(_dialogue(start, end, " ".join(chunks)))
+    else:
+        fr_lines = break_lines_fr(words_out, max_chars=22)
+        blocks = group_into_blocks(fr_lines, max_lines=2)
+        for block in blocks:
+            if not block:
+                continue
+            block_words = [w for line in block for w in line]
+            start = block_words[0]["start"]
+            end = block_words[-1]["end"]
+            text = "\\N".join(
+                apply_french_typography(" ".join(w["word"] for w in line))
+                for line in block
+            )
+            lines.append(_dialogue(start, end, text))
 
     Path(path).write_text("\n".join(lines), encoding="utf-8")
     return path
