@@ -19,7 +19,15 @@ except ImportError:
 
 import sortclip.compile as compile_mod
 from sortclip.edl import EDL, Source, Canvas, Captions, Background
-from sortclip.compile import build_filter_complex, build_command, measure_loudness, _audio_keeps_filter
+from sortclip.compile import (
+    build_filter_complex, build_command, measure_loudness, _audio_keeps_filter,
+    speech_intervals_from_words, non_speech_gaps, _speech_only_filter,
+)
+
+
+def _words(pairs):
+    """[(start, end), ...] -> words_out (temps de SORTIE), texte factice."""
+    return [{"word": "mot", "start": s, "end": e} for s, e in pairs]
 
 
 def _edl(n_keeps=1):
@@ -132,6 +140,92 @@ def test_measure_loudness_returns_none_without_ffmpeg():
     # ffmpeg n'est pas installé dans cet environnement de test — on vérifie
     # que l'absence ne lève JAMAIS (comportement best-effort attendu).
     result = measure_loudness(_edl())
+    assert result is None
+
+
+# --- Musique de fond vs parole (suite H1, demande utilisateur) --------------
+
+def test_speech_intervals_merges_close_words_and_pads():
+    # Deux mots à 1s d'écart (silence court, pause naturelle dans une phrase)
+    # doivent fusionner en UN intervalle (marge de fusion 0.35s < 1s ? non :
+    # ici l'écart réel entre la fin d'un mot et le début du suivant doit être
+    # sous le seuil de fusion pour fusionner).
+    words = _words([(0.0, 0.5), (0.6, 1.1)])   # écart de 0.1s entre les mots
+    intervals = speech_intervals_from_words(words, pad=0.1, merge_gap=0.35)
+    assert len(intervals) == 1
+    assert intervals[0][0] < 0.0 + 1e-9 or intervals[0][0] == 0.0 - 0.1 or intervals[0][0] >= -0.1
+    # Le début est élargi de `pad` mais jamais négatif.
+    assert intervals[0][0] == 0.0
+    assert intervals[0][1] == 1.1 + 0.1
+
+
+def test_speech_intervals_keeps_distant_words_separate():
+    words = _words([(0.0, 0.5), (5.0, 5.5)])   # écart de 4.5s : pas de fusion
+    intervals = speech_intervals_from_words(words, pad=0.1, merge_gap=0.35)
+    assert len(intervals) == 2
+
+
+def test_speech_intervals_empty_when_no_words():
+    assert speech_intervals_from_words([]) == []
+
+
+def test_non_speech_gaps_excludes_speech_and_short_gaps():
+    intervals = [(0.0, 5.0), (5.3, 10.0)]   # trou de 0.3s entre les deux : trop court
+    gaps = non_speech_gaps(intervals, out_duration=15.0, min_gap=0.5)
+    # Le petit trou (5.0-5.3) est ignoré ; le grand trou final (10.0-15.0) est gardé.
+    assert gaps == [(10.0, 15.0)]
+
+
+def test_non_speech_gaps_keeps_long_gap_between_speech():
+    intervals = [(0.0, 2.0), (8.0, 10.0)]   # trou de 6s : musique seule probable
+    gaps = non_speech_gaps(intervals, out_duration=10.0, min_gap=0.5)
+    assert gaps == [(2.0, 8.0)]
+
+
+def test_build_filter_complex_ducks_non_speech_gaps_when_words_provided():
+    compile_mod.ENABLE_AUDIO_CHAIN_H1 = True
+    try:
+        edl = _edl()   # out_duration = 5.0
+        words = _words([(0.0, 1.0)])   # parole seulement au début -> gros trou après
+        fc = build_filter_complex(edl, words_out=words)
+        assert "volume=" in fc
+        assert "enable=" in fc
+        assert f"{compile_mod.DUCK_NON_SPEECH_DB}dB" in fc
+    finally:
+        compile_mod.ENABLE_AUDIO_CHAIN_H1 = False
+
+
+def test_build_filter_complex_no_duck_without_words():
+    # Sans words_out (repli), comportement identique à avant : pas de volume/enable.
+    compile_mod.ENABLE_AUDIO_CHAIN_H1 = True
+    try:
+        fc = build_filter_complex(_edl())
+        assert "enable=" not in fc
+    finally:
+        compile_mod.ENABLE_AUDIO_CHAIN_H1 = False
+
+
+def test_speech_only_filter_single_interval_uses_anull():
+    fc, label = _speech_only_filter("ca_out", [(0.0, 1.0)])
+    assert "anull" in fc
+    assert label.endswith("_out")
+
+
+def test_speech_only_filter_multi_interval_uses_concat():
+    fc, label = _speech_only_filter("ca_out", [(0.0, 1.0), (2.0, 3.0)])
+    assert "concat=n=2:v=0:a=1" in fc
+
+
+def test_speech_only_filter_empty_intervals_is_passthrough():
+    fc, label = _speech_only_filter("ca_out", [])
+    assert "anull" in fc
+    assert "[ca_out]" in fc
+
+
+def test_measure_loudness_accepts_words_out_without_crashing():
+    # Toujours best-effort : ffmpeg absent ici, doit renvoyer None, jamais lever.
+    words = _words([(0.0, 1.0), (3.0, 4.0)])
+    result = measure_loudness(_edl(), words_out=words)
     assert result is None
 
 

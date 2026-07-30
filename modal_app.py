@@ -1297,7 +1297,7 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
     ass_path = os.path.join(tmp, f"{Path(out_path).stem}.ass")
     build_ass(words_out, edl.captions, edl.canvas, ass_path)
 
-    result = edl_render(edl, out_path, ass_path=ass_path)
+    result = edl_render(edl, out_path, ass_path=ass_path, words_out=words_out)
     if result.returncode != 0:
         raise RuntimeError(f"rendu EDL échoué : {result.stderr[-500:]}")
 
@@ -2007,7 +2007,7 @@ def _rerender_from_edl(edl_dict: dict, edl_words: list, resolution: str,
     ass_path = os.path.join(tmp, "clip.ass")
     words_out = map_words_to_output(edl_words or [], edl)
     build_ass(words_out, edl.captions, edl.canvas, ass_path)
-    result = edl_render(edl, out_path, ass_path=ass_path)
+    result = edl_render(edl, out_path, ass_path=ass_path, words_out=words_out)
     if result.returncode != 0:
         raise RuntimeError(f"re-rendu échoué : {result.stderr[-500:]}")
 

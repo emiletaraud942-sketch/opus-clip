@@ -42,6 +42,79 @@ LOUDNORM_TARGET_LRA = 11.0    # plage dynamique cible
 _DEESS_FREQ_HZ = 7500
 _DEESS_GAIN_DB = -3
 
+# H1 (suite) — musique de fond vs parole. On n'a qu'UNE seule piste audio déjà
+# mixée : on ne peut pas séparer musique et voix quand elles jouent EN MÊME
+# TEMPS sans un modèle de séparation de sources (type Demucs — nécessite
+# torch, pas installé dans cet environnement, coût GPU par clip à évaluer).
+# {{À_COMPLÉTER : si une vraie séparation de sources est voulue, c'est un
+# chantier à part avec son propre coût — non fait ici, documenté comme tel.}}
+#
+# Ce qu'on SAIT en revanche, avec certitude, sans aucun modèle : QUAND la
+# parole a lieu (les timestamps mot-à-mot d'AssemblyAI, déjà dans le
+# pipeline). Deux corrections déterministes en découlent :
+#   1. mesurer le volume UNIQUEMENT sur les passages parlés (pas sur les
+#      silences ni les passages où seule la musique joue) -> une cible de
+#      normalisation qui reflète la voix, pas une moyenne diluée par la
+#      musique. C'est la cause la plus probable du "la normalisation ne
+#      marche pas bien" : mesurer sur le mix entier tire la cible vers le
+#      niveau de la musique quand elle est présente une bonne partie du clip.
+#   2. atténuer légèrement le niveau global pendant les passages SANS parole
+#      (musique seule / silence) pour éviter que la musique ressorte plus
+#      fort entre deux phrases qu'elle ne le fait pendant que quelqu'un parle.
+# Marge de sécurité (pas de coupure nette pile sur le mot) : on élargit
+# chaque intervalle de parole avant de fusionner les trous proches, pour ne
+# jamais couper une respiration ou une consonne finale.
+SPEECH_PAD_SECONDS = 0.15
+SPEECH_MERGE_GAP_SECONDS = 0.35
+# Sous ce seuil, un "trou" entre deux passages parlés est trop court pour
+# qu'une baisse de volume s'entende autrement que comme un artefact de pompage.
+MIN_DUCK_GAP_SECONDS = 0.5
+# {{À_COMPLÉTER : validé à l'oreille — -5dB est un point de départ prudent
+# (perceptible mais pas un "trou" audible), à ajuster sur de vrais clips.}}
+DUCK_NON_SPEECH_DB = -5.0
+
+
+def speech_intervals_from_words(words_out: list[dict],
+                                pad: float = SPEECH_PAD_SECONDS,
+                                merge_gap: float = SPEECH_MERGE_GAP_SECONDS) -> list[tuple[float, float]]:
+    """Convertit des mots (temps de SORTIE, comme `words_out` ailleurs dans le
+    projet) en intervalles [début, fin] de présence de parole, fusionnés
+    quand deux mots sont proches (silence court dans une phrase) et élargis
+    de `pad` secondes de chaque côté (marge de sécurité, jamais coupé pile
+    sur un phonème). Pure, ne dépend d'aucun signal audio ni modèle."""
+    words = sorted(
+        (w for w in words_out if w.get("word", "").strip()),
+        key=lambda w: w["start"],
+    )
+    if not words:
+        return []
+    intervals: list[list[float]] = []
+    for w in words:
+        start = max(0.0, float(w["start"]) - pad)
+        end = float(w["end"]) + pad
+        if intervals and start <= intervals[-1][1] + merge_gap:
+            intervals[-1][1] = max(intervals[-1][1], end)
+        else:
+            intervals.append([start, end])
+    return [(s, e) for s, e in intervals]
+
+
+def non_speech_gaps(intervals: list[tuple[float, float]], out_duration: float,
+                    min_gap: float = MIN_DUCK_GAP_SECONDS) -> list[tuple[float, float]]:
+    """Complémentaire des intervalles de parole dans [0, out_duration] :
+    les passages où on est sûr qu'il n'y a QUE de la musique (ou du silence),
+    jamais de la voix. Ignore les trous trop courts (< min_gap) pour ne pas
+    produire un pompage audible sur une simple respiration entre deux mots."""
+    gaps: list[tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in sorted(intervals):
+        if start - cursor >= min_gap:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    if out_duration - cursor >= min_gap:
+        gaps.append((cursor, out_duration))
+    return gaps
+
 
 def _hex_to_ff(color: str) -> str:
     return "0x" + color.lstrip("#").upper()
@@ -74,14 +147,49 @@ def _audio_keeps_filter(edl: EDL, audio_label: str = "ka") -> tuple[str, str]:
     return ";".join(parts), out_label
 
 
-def measure_loudness(edl: EDL) -> dict | None:
+def _speech_only_filter(base_label: str, intervals: list[tuple[float, float]],
+                        audio_label: str = "casp") -> tuple[str, str]:
+    """Sous-graphe qui ne garde, dans un flux déjà en TEMPS DE SORTIE
+    (`base_label`), que les intervalles de parole — pour mesurer le volume
+    SANS le diluer par la musique seule ou le silence. Retourne (filtre,
+    label) ; si aucun intervalle, retourne un passthrough (anull)."""
+    if not intervals:
+        return f"[{base_label}]anull[{audio_label}_out]", f"{audio_label}_out"
+    parts: list[str] = []
+    for i, (s, e) in enumerate(intervals):
+        parts.append(
+            f"[{base_label}]atrim=start={s:.3f}:end={e:.3f},"
+            f"asetpts=PTS-STARTPTS[{audio_label}{i}]"
+        )
+    out_label = f"{audio_label}_out"
+    if len(intervals) == 1:
+        parts.append(f"[{audio_label}0]anull[{out_label}]")
+    else:
+        chain = "".join(f"[{audio_label}{i}]" for i in range(len(intervals)))
+        parts.append(f"{chain}concat=n={len(intervals)}:v=0:a=1[{out_label}]")
+    return ";".join(parts), out_label
+
+
+def measure_loudness(edl: EDL, words_out: list[dict] | None = None) -> dict | None:
     """H1, passe 1 — mesure le volume réel de l'audio du clip (après
     trim/concat des `keeps`, AVANT tout traitement) via `loudnorm` en mode
     mesure seule (aucun fichier produit). Renvoie les clés attendues par la
     passe 2 (`measured_I`, `measured_TP`, `measured_LRA`, `measured_thresh`,
     `target_offset`), ou None si la mesure échoue — le rendu retombe alors sur
-    un loudnorm à une passe (moins précis, mais jamais bloquant)."""
+    un loudnorm à une passe (moins précis, mais jamais bloquant).
+
+    Si `words_out` est fourni (mots en temps de SORTIE, même base que le reste
+    du projet), la mesure porte UNIQUEMENT sur les passages parlés — pas sur
+    les silences ni les passages où seule la musique de fond joue. Sans ça, la
+    cible de normalisation est tirée vers le niveau de la musique dès qu'elle
+    occupe une part significative du clip, ce qui produit une voix qui sonne
+    tantôt trop forte, tantôt trop faible selon le clip."""
     audio_filter, out_label = _audio_keeps_filter(edl)
+    if words_out:
+        intervals = speech_intervals_from_words(words_out)
+        if intervals:
+            speech_filter, out_label = _speech_only_filter(out_label, intervals)
+            audio_filter = f"{audio_filter};{speech_filter}"
     loudnorm = (
         f"highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=5:release=50,"
         f"loudnorm=I={LOUDNORM_TARGET_I}:TP={LOUDNORM_TARGET_TP}:"
@@ -116,7 +224,8 @@ def measure_loudness(edl: EDL) -> dict | None:
 
 
 def build_filter_complex(edl: EDL, ass_path: str | None = None,
-                         loudness_measurement: dict | None = None) -> str:
+                         loudness_measurement: dict | None = None,
+                         words_out: list[dict] | None = None) -> str:
     c = edl.canvas
     fw, fh = foreground_size(edl)
     parts: list[str] = []
@@ -156,6 +265,18 @@ def build_filter_complex(edl: EDL, ass_path: str | None = None,
             "acompressor=threshold=-18dB:ratio=3:attack=5:release=50",
             f"equalizer=f={_DEESS_FREQ_HZ}:width_type=o:width=2:g={_DEESS_GAIN_DB}",
         ]
+        # Atténue les passages SANS parole (musique seule / silence), pour que
+        # la musique de fond ne ressorte pas plus fort qu'entre les phrases
+        # qu'elle ne le fait pendant que quelqu'un parle. Basé sur les mêmes
+        # timestamps mot-à-mot que les sous-titres — aucun modèle audio requis,
+        # aucun risque de couper la voix par erreur (pad de sécurité inclus).
+        if words_out:
+            intervals = speech_intervals_from_words(words_out)
+            gaps = non_speech_gaps(intervals, edl.out_duration)
+            for gap_start, gap_end in gaps:
+                audio_chain.append(
+                    f"volume={DUCK_NON_SPEECH_DB}dB:enable='between(t,{gap_start:.3f},{gap_end:.3f})'"
+                )
         if loudness_measurement:
             m = loudness_measurement
             audio_chain.append(
@@ -284,8 +405,10 @@ def build_command(
     encoder: str = "libx264",
     crf: int = 18,
     loudness_measurement: dict | None = None,
+    words_out: list[dict] | None = None,
 ) -> list[str]:
-    fc = build_filter_complex(edl, ass_path, loudness_measurement=loudness_measurement)
+    fc = build_filter_complex(edl, ass_path, loudness_measurement=loudness_measurement,
+                              words_out=words_out)
     cmd = [
         "ffmpeg", "-y",
         "-i", edl.source.path,
@@ -311,7 +434,7 @@ def render(edl: EDL, out_path: str, **kw) -> subprocess.CompletedProcess:
     # (la mesure ne servirait à rien : build_filter_complex ignore la chaîne
     # audio dans ce cas) — évite une passe ffmpeg supplémentaire pour rien.
     if ENABLE_AUDIO_CHAIN_H1 and "loudness_measurement" not in kw:
-        kw = {**kw, "loudness_measurement": measure_loudness(edl)}
+        kw = {**kw, "loudness_measurement": measure_loudness(edl, words_out=kw.get("words_out"))}
     cmd = build_command(edl, out_path, **kw)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     return subprocess.run(cmd, capture_output=True, text=True)
