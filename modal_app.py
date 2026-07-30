@@ -2059,8 +2059,23 @@ def _rerender_from_edl(edl_dict: dict, edl_words: list, resolution: str,
     edl = EDL.model_validate(edl_dict)
     # Réancre la source sur le fichier fraîchement téléchargé + la résolution.
     w, h = OUTPUT_RESOLUTIONS.get(resolution, (1080, 1920))
+    # Re-sonde TOUJOURS les dimensions réelles à chaque retouche, plutôt que
+    # de réutiliser celles figées dans l'EDL au moment de la première
+    # génération — un clip généré avant le fix de la rotation (vidéo filmée
+    # au téléphone en portrait mais encodée en paysage, cf. probe_source())
+    # avait les mauvaises dimensions stockées ; sans ce re-sondage, AUCUNE
+    # retouche ne pourrait jamais corriger la déformation, seule une
+    # régénération complète le pourrait. Best-effort : si la sonde échoue,
+    # on garde les dimensions déjà stockées plutôt que de faire échouer la retouche.
+    from sortclip.compile import probe_source
+    try:
+        sw, sh = probe_source(source_local)
+    except Exception as exc:
+        print(f"[rerender_clip] sonde dimensions échouée (non bloquant, dimensions "
+              f"existantes conservées) : {exc}")
+        sw, sh = edl.source.width, edl.source.height
     edl = edl.model_copy(update={
-        "source": edl.source.model_copy(update={"path": source_local}),
+        "source": edl.source.model_copy(update={"path": source_local, "width": sw, "height": sh}),
         "canvas": Canvas(w=w, h=h, fps=edl.canvas.fps),
     })
     edl, _ = validate(edl, word_count=len(edl_words or []))
