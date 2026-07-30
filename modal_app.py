@@ -449,21 +449,43 @@ def refund_reservations(supabase, user_id: str, reservations: list):
         supabase.table("usage_log").update({"status": "refunded"}).eq("id", r["id"]).execute()
 
 
-def transcribe(video_path: str):
+def transcribe(video_path: str, word_boost: list[str] | None = None):
     """Transcrit l'audio avec AssemblyAI. Retourne les mots horodatés
     (en secondes) et le texte complet.
 
     Note : la fonctionnalité "Auto Highlights" d'AssemblyAI n'est pas
     disponible en français, donc les mots-clés à mettre en emphase sont
     déterminés par Claude (voir select_clips_with_llm) plutôt que par
-    AssemblyAI."""
+    AssemblyAI.
+
+    Chantier « correction-sous-titres » — B1 (langue/tâche) : `language_code`
+    est déjà épinglé à "fr" (jamais de détection automatique, qui se trompe
+    facilement sur une intro musicale ou du bruit) ; AssemblyAI n'a par
+    ailleurs PAS de mode "traduction" séparé comme Whisper (translate vs
+    transcribe) — cette confusion précise n'existe donc pas sur ce moteur,
+    contrairement à ce qu'un playbook pensé pour Whisper suppose. `speech_model`
+    fixé explicitement à "best" (B3 — c'est déjà la valeur par défaut du SDK,
+    mais la rendre explicite documente le choix et empêche une régression
+    silencieuse si le défaut du SDK change un jour).
+
+    B4 (vocabulaire) : `word_boost` — passe les mots que l'utilisateur a déjà
+    corrigés à la main sur SES clips précédents (table user_lexicon, voir
+    _apply_lexicon) en amorce de vocabulaire pour AssemblyAI, pour que la
+    transcription soit la bonne dès la première fois plutôt que corrigée après
+    coup à chaque fois. `boost_param="high"` : ces mots sont des corrections
+    déjà validées par l'utilisateur, pas une supposition — priorité forte
+    justifiée. Optionnel, ne bloque jamais si vide."""
     import assemblyai as aai
 
     aai.settings.api_key = os.environ["ASSEMBLYAI_API_KEY"]
     transcriber = aai.Transcriber()
+    config_kwargs = {"language_code": "fr", "speech_model": "best"}
+    if word_boost:
+        config_kwargs["word_boost"] = word_boost[:1000]  # limite documentée du SDK
+        config_kwargs["boost_param"] = "high"
     transcript = transcriber.transcribe(
         video_path,
-        config=aai.TranscriptionConfig(language_code="fr"),
+        config=aai.TranscriptionConfig(**config_kwargs),
     )
 
     if transcript.status == aai.TranscriptStatus.error:
@@ -938,6 +960,22 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme exac
 
 def words_in_range(words: list, start: float, end: float) -> list:
     return [w for w in words if w["start"] >= start and w["end"] <= end]
+
+
+def _user_lexicon_words(supabase, user_id: str) -> list[str]:
+    """B4 : les corrections `right_word` déjà validées par l'utilisateur sur
+    ses clips précédents, à passer en `word_boost` à AssemblyAI (voir
+    transcribe()) — pour que la transcription soit juste dès la première
+    fois. Ne lève jamais (table pas migrée ou vide -> liste vide, aucun impact)."""
+    try:
+        rows = (
+            supabase.table("user_lexicon").select("right_word")
+            .eq("user_id", user_id).execute().data or []
+        )
+    except Exception as exc:
+        print(f"[transcribe] lexique utilisateur indisponible pour word_boost (non bloquant) : {exc}")
+        return []
+    return [r["right_word"] for r in rows if r.get("right_word")]
 
 
 def _apply_lexicon(supabase, user_id: str, words: list[dict]) -> list[dict]:
@@ -1510,9 +1548,26 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     )
                 reservations = reserve_minutes(supabase, user_id, plan, source_path, need_minutes)
 
-            words, full_text = transcribe(local_video)
+            # B4 : le lexique de l'utilisateur sert maintenant DEUX fois — en
+            # amorce de vocabulaire AVANT transcription (ici, pour que ce soit
+            # juste dès le premier passage), puis en substitution de texte
+            # APRÈS (ci-dessous, filet de sécurité si le mot boosté n'a quand
+            # même pas été reconnu). N'échoue jamais si la table est vide/absente.
+            word_boost = _user_lexicon_words(supabase, user_id)
+            words, full_text = transcribe(local_video, word_boost=word_boost)
             if not words:
                 raise RuntimeError("Aucune parole détectée dans cette vidéo — impossible de générer des clips.")
+
+            # C3/C4 : retire les artefacts d'hallucination connus, les mots de
+            # durée invraisemblable et les boucles, AVANT toute autre étape
+            # (sélection, sous-titrage). Journalise ce qui est retiré (C3 :
+            # "journalisant chaque suppression") pour pouvoir vérifier plus
+            # tard qu'aucun contenu légitime n'est écarté.
+            from sortclip import clean_hallucinations
+            words, _halluc_counts = clean_hallucinations(words)
+            if _halluc_counts["removed_total"]:
+                print(f"[process_video] hallucinations/boucles filtrées : {_halluc_counts}")
+                full_text = " ".join(w["word"] for w in words)
 
             # A7 : applique le lexique de corrections déjà mémorisées par
             # l'utilisateur (noms propres, jargon) aux mots transcrits — ne
