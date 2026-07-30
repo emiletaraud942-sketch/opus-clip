@@ -18,6 +18,39 @@ from __future__ import annotations
 # prod avant activation (repasser à True). Le code reste en place et testé.
 ENABLE_FR_LINE_BREAKING = False
 
+# Bug signalé par l'utilisateur : le regroupement par nombre de mots fixe
+# (words_per_line) ignore le SILENCE entre deux mots. Si une pause tombe au
+# milieu d'un groupe, tout le texte du groupe (y compris les mots d'APRÈS la
+# pause, pas encore prononcés) s'affiche dès le premier mot du groupe — on
+# voit des mots à l'écran pendant que personne ne parle. Un groupe ne doit
+# donc jamais traverser une pause plus longue que ce seuil.
+# {{À_COMPLÉTER : validé visuellement, pas mesuré — 0.6s est le point de
+# départ habituel pour une pause "audible" entre deux groupes de mots.}}
+MAX_CAPTION_PAUSE_GAP = 0.6
+
+
+def group_words_by_pause(words_out: list[dict], max_words: int | None = None,
+                         max_gap: float = MAX_CAPTION_PAUSE_GAP) -> list[list[dict]]:
+    """Regroupe des mots (temps de SORTIE) en respectant DEUX limites : un
+    nombre de mots maximum (`max_words`, None = illimité) ET une pause
+    maximum tolérée ENTRE deux mots consécutifs (`max_gap`). Dès qu'une pause
+    dépasse `max_gap`, le groupe est coupé — jamais de mots affichés avant
+    d'être prononcés à cause d'une pause interne au groupe. Pure, testable."""
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    prev_end: float | None = None
+    for w in words_out:
+        gap_too_long = prev_end is not None and float(w["start"]) - prev_end > max_gap
+        count_full = max_words is not None and len(current) >= max_words
+        if current and (gap_too_long or count_full):
+            groups.append(current)
+            current = []
+        current.append(w)
+        prev_end = float(w["end"])
+    if current:
+        groups.append(current)
+    return groups
+
 
 def _hex_to_ass(color: str) -> str:
     """#RRGGBB -> &H00BBGGRR (composantes inversées, alpha opaque)."""
@@ -123,7 +156,11 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
 
     if captions.style == "karaoke" or not ENABLE_FR_LINE_BREAKING:
         wpl = captions.words_per_line
-        groups = [words_out[i:i + wpl] for i in range(0, len(words_out), wpl)]
+        # Coupe aussi le groupe sur une pause trop longue (voir
+        # group_words_by_pause) : sans ça, un groupe de `wpl` mots qui
+        # chevauche un silence affiche les mots d'après-pause à l'écran avant
+        # qu'ils soient prononcés.
+        groups = group_words_by_pause(words_out, max_words=wpl)
         for g in groups:
             if not g:
                 continue
@@ -139,8 +176,13 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
                 lines.append(_dialogue(start, end, " ".join(w["word"] for w in g)))
     else:
         from .subtitles_fr import break_lines_fr, group_into_blocks, apply_french_typography
-        fr_lines = break_lines_fr(words_out, max_chars=22)
-        blocks = group_into_blocks(fr_lines, max_lines=2)
+        # Découpe d'abord sur les pauses (mêmes règles que ci-dessus), PUIS
+        # applique le découpage linguistique FR à l'intérieur de chaque
+        # segment sans pause — un bloc ne doit jamais traverser un silence.
+        blocks: list[list[list[dict]]] = []
+        for segment in group_words_by_pause(words_out, max_words=None):
+            fr_lines = break_lines_fr(segment, max_chars=22)
+            blocks.extend(group_into_blocks(fr_lines, max_lines=2))
         for block in blocks:
             if not block:
                 continue
