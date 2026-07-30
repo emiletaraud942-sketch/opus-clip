@@ -798,6 +798,25 @@ def _record_usage(usage_sink, model, response):
         pass
 
 
+# D3 (routage modèle) — audit des points d'appel LLM de SortClip, TOUS à
+# température 0 :
+#   - select_clips_with_llm (ici)      : claude-sonnet-4-5 — tâche de jugement
+#     éditorial complexe (rubrique à 5 critères, arbitrage narratif) sur tout
+#     le transcript : garder le modèle le plus capable, c'est le coeur produit.
+#   - director.direct / adjust_with_text : claude-sonnet-4-5 (DIRECTOR_MODEL,
+#     sortclip/director.py) — placement de cadrages/emphases par index de mots
+#     et traduction de consignes libres en patchs ; nécessite de la nuance
+#     (voir motivation/raison, A2) : gardé sur sonnet.
+#   - generate_tiktok_copy (plus bas)  : claude-haiku-4-5-20251001 — légende +
+#     hashtags, tâche courte et peu ambiguë : DÉJÀ sur le modèle le moins cher,
+#     confirmé correct par cet audit (aucun changement nécessaire).
+# Recommandation NON appliquée : adjust_with_text() pourrait théoriquement
+# passer sur un modèle moins cher (la tâche — convertir des événements
+# existants + une consigne en patchs — est plus contrainte que le placement
+# initial). Non fait ici : je n'ai aucun moyen de mesurer un éventuel écart de
+# qualité dans ce bac à sable (pas d'appel API réel, pas de jeu de 40 clips) —
+# changer un modèle sans pouvoir mesurer l'effet violerait la règle de
+# progression du chantier. À tester en A/B en production avant d'appliquer.
 def select_clips_with_llm(words: list, full_text: str, signals: dict | None = None, usage_sink: list | None = None, extra_guidance: str = "") -> list:
     """Demande à Claude d'évaluer les meilleurs moments selon la rubrique à
     cinq critères (cf. PROMPTS-CLAUDE prompt B), en découpe par INDEX DE MOTS.
