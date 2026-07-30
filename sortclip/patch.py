@@ -103,13 +103,29 @@ def apply_text_adjustment(edl: EDL, instruction: str) -> tuple[EDL, list[str]]:
 
     # --- Cadrages / zooms ---
     if "moins de zoom" in s or "moins de cadrage" in s or "trop de zoom" in s:
-        framings = [e for e in edl2.events if e.op == "framing"]
+        framings = sorted((e for e in edl2.events if e.op == "framing"), key=lambda x: x.t)
         if framings:
-            # On garde un cadrage sur deux (le premier, le troisième…).
-            keep_ids = {e.id for i, e in enumerate(sorted(framings, key=lambda x: x.t)) if i % 2 == 0}
-            new_events = [e for e in edl2.events if e.op != "framing" or e.id in keep_ids]
+            n_remove = len(framings) // 2
+            # A2 : retire les événements les MOINS justifiés (motivation) en
+            # premier — déterministe, aucun jugement LLM nécessaire. À
+            # motivation égale (0.5 par défaut, EDL sans score réel posé par
+            # le réalisateur), on retombe sur l'alternance un-sur-deux de
+            # l'ancien comportement, pour ne rien changer sur les EDL existants.
+            ordered = sorted(
+                enumerate(framings),
+                key=lambda item: (item[1].motivation, item[0] % 2 == 0),
+            )
+            remove_ids = {f.id for _, f in ordered[:n_remove]}
+            new_events = [e for e in edl2.events if e.op != "framing" or e.id not in remove_ids]
             edl2 = edl2.model_copy(update={"events": new_events})
-            notes.append(f"zooms réduits ({len(framings)} -> {len(keep_ids)})")
+            notes.append(f"zooms réduits ({len(framings)} -> {len(framings) - len(remove_ids)}, "
+                        f"retire les moins justifiés)")
+
+    # « plus de zooms » n'est PAS traité ici : ajouter un zoom pertinent
+    # suppose d'identifier un nouveau moment fort, ce qui n'est pas
+    # déterministe. On laisse volontairement `notes` sans correspondance pour
+    # cette consigne — le repli LLM (plus bas dans l'appelant, sur
+    # « non reconnue ») s'en charge.
     if "aucun zoom" in s or "sans zoom" in s or "pas de zoom" in s:
         new_events = [e for e in edl2.events if e.op != "framing"]
         edl2 = edl2.model_copy(update={"events": new_events})
@@ -131,6 +147,15 @@ def apply_text_adjustment(edl: EDL, instruction: str) -> tuple[EDL, list[str]]:
             edl2 = edl2.model_copy(update={"events": [*edl2.events, tight]})
             notes.append("cadrage resserré ajouté (gros plan)")
 
+    # --- Plan large sur tout le clip (A1) ---
+    if "plan large" in s or "dézoome" in s or "dezoome" in s or "recule" in s:
+        new_events = [
+            e.model_copy(update={"value": "wide"}) if e.op == "framing" else e
+            for e in edl2.events
+        ]
+        edl2 = edl2.model_copy(update={"events": new_events})
+        notes.append("cadrage élargi sur tout le clip")
+
     # --- Taille des sous-titres ---
     if "sous-titre" in s or "sous titre" in s or "texte" in s:
         if "plus gros" in s or "plus grand" in s or "plus grand" in s:
@@ -148,6 +173,57 @@ def apply_text_adjustment(edl: EDL, instruction: str) -> tuple[EDL, list[str]]:
                     update={"primary": hexv})})
                 notes.append(f"sous-titres en {word}")
                 break
+        # Position verticale (A1) — y=0 haut, y=1 bas (cf. sortclip.edl.Captions.y).
+        if "monte" in s or "plus haut" in s or "remonte" in s:
+            edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(
+                update={"y": max(0.05, edl2.captions.y - 0.10)})})
+            notes.append(f"sous-titres remontés (y={edl2.captions.y:.2f})")
+        elif "descend" in s or "plus bas" in s:
+            edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(
+                update={"y": min(0.95, edl2.captions.y + 0.10)})})
+            notes.append(f"sous-titres descendus (y={edl2.captions.y:.2f})")
+        # Graisse (A1)
+        if "en gras" in s or "plus gras" in s:
+            edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"bold": True})})
+            notes.append("sous-titres en gras")
+        elif "pas gras" in s or "sans gras" in s or "moins gras" in s:
+            edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"bold": False})})
+            notes.append("sous-titres sans gras")
+
+    # --- Style karaoké / classique (A1) — hors du bloc "sous-titre" ci-dessus :
+    # une consigne comme « style karaoké » ou « mot par mot » ne contient pas
+    # forcément le mot « sous-titre ».
+    if "karaoké" in s or "karaoke" in s or "mot par mot" in s or "mot-à-mot" in s:
+        edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"style": "karaoke"})})
+        notes.append("style karaoké (mot à mot)")
+    elif "sous-titres classiques" in s or "sans karaoké" in s or "sans karaoke" in s:
+        edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"style": "plain"})})
+        notes.append("style classique")
+
+    # --- Coupe le début / la fin (A1) ---
+    # Retire une durée fixe (2 s) au début ou à la fin du montage, en
+    # rétrécissant le premier/dernier intervalle gardé — jamais en dessous
+    # d'une seconde restante, pour ne pas produire un clip vide.
+    TRIM_SECONDS = 2.0
+    # NOTE : out_duration est une PROPRIÉTÉ CALCULÉE depuis `keeps` (voir
+    # edl.py) — on ne la passe jamais à model_copy(update=...), elle se
+    # recalcule automatiquement dès que `keeps` change.
+    if ("coupe le début" in s or "coupe le debut" in s or "raccourcis le début" in s
+            or "enlève le début" in s or "enleve le debut" in s):
+        keeps = sorted(edl2.keeps, key=lambda k: k.start)
+        if keeps and (keeps[0].end - keeps[0].start) > (TRIM_SECONDS + 1.0):
+            new_first = keeps[0].model_copy(update={"start": keeps[0].start + TRIM_SECONDS})
+            new_keeps = [new_first, *keeps[1:]]
+            edl2 = edl2.model_copy(update={"keeps": new_keeps})
+            notes.append(f"début raccourci de {TRIM_SECONDS:.0f}s")
+    if ("coupe la fin" in s or "raccourcis la fin" in s
+            or "enlève la fin" in s or "enleve la fin" in s):
+        keeps = sorted(edl2.keeps, key=lambda k: k.start)
+        if keeps and (keeps[-1].end - keeps[-1].start) > (TRIM_SECONDS + 1.0):
+            new_last = keeps[-1].model_copy(update={"end": keeps[-1].end - TRIM_SECONDS})
+            new_keeps = [*keeps[:-1], new_last]
+            edl2 = edl2.model_copy(update={"keeps": new_keeps})
+            notes.append(f"fin raccourcie de {TRIM_SECONDS:.0f}s")
 
     # --- Fond ---
     if "plus flou" in s:

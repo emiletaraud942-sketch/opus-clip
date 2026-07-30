@@ -27,6 +27,7 @@ RÈGLES ABSOLUES :
 - Tu ne donnes JAMAIS de temps en secondes. Uniquement des index de mots.
 - Peu d'événements, bien placés, valent mieux que beaucoup. 3 à 6 cadrages pour un clip d'une minute.
 - Ne place pas deux cadrages sur des mots voisins.
+- Pour CHAQUE événement, remplis `motivation` (0 à 1, à quel point ce choix est justifié — 1 pour une punchline ou un changement de locuteur net, 0.3 pour un simple rythme de remplissage) et `raison` (motif court : « punchline », « changement de locuteur », « respiration »…). Sois honnête sur les valeurs basses : c'est ce qui permet à l'utilisateur de retirer les événements les moins utiles sans tout recalculer.
 
 Certains mots portent une annotation entre parenthèses : (énergie +Xσ) = pic d'intensité vocale mesuré, (débit +X%) = accélération du débit de parole par rapport à la moyenne du clip, (pause Xs) = silence avant ce mot, (rire détecté) = rire probable détecté dans l'audio. Un moment fort s'entend avant de se lire : privilégie ces marqueurs pour placer tes zooms — ils sont plus fiables que le texte seul. L'absence de marqueur ne veut rien dire de spécial (peu de mots en portent)."""
 
@@ -57,8 +58,16 @@ def build_place_events_tool() -> dict:
                             "word_index": {"type": "integer"},
                             "value": {"type": "string", "enum": ["wide", "medium", "tight"]},
                             "transition": {"type": "string", "enum": ["cut", "punch", "smooth"]},
+                            "motivation": {
+                                "type": "number",
+                                "description": "À quel point ce cadrage est justifié, de 0 à 1 (0 = arbitraire, 1 = décisif).",
+                            },
+                            "raison": {
+                                "type": "string",
+                                "description": "Motif court : punchline, changement de locuteur, respiration…",
+                            },
                         },
-                        "required": ["word_index", "value"],
+                        "required": ["word_index", "value", "motivation", "raison"],
                     },
                 },
                 "emphases": {
@@ -68,8 +77,13 @@ def build_place_events_tool() -> dict:
                         "properties": {
                             "word_index": {"type": "integer"},
                             "style": {"type": "string", "enum": ["pop", "underline", "scale"]},
+                            "motivation": {
+                                "type": "number",
+                                "description": "À quel point cette emphase est justifiée, de 0 à 1.",
+                            },
+                            "raison": {"type": "string"},
                         },
-                        "required": ["word_index"],
+                        "required": ["word_index", "motivation", "raison"],
                     },
                 },
             },
@@ -125,6 +139,8 @@ def events_from_tool_input(tool_input: dict, words_out: list[dict]) -> list:
                 t=float(words_out[i]["start"]),
                 value=f.get("value", "medium"),
                 transition=f.get("transition", "cut"),
+                motivation=_clamp01(f.get("motivation", 0.5)),
+                raison=str(f.get("raison", ""))[:200],
             ))
         except Exception:
             continue
@@ -136,10 +152,21 @@ def events_from_tool_input(tool_input: dict, words_out: list[dict]) -> list:
             events.append(EmphasisEvent(
                 t=float(words_out[i]["start"]), word_index=i,
                 style=e.get("style", "pop"),
+                motivation=_clamp01(e.get("motivation", 0.5)),
+                raison=str(e.get("raison", ""))[:200],
             ))
         except Exception:
             continue
     return events
+
+
+def _clamp01(v) -> float:
+    """A2 : le LLM peut renvoyer une motivation hors [0,1] ou non numérique —
+    on la borne plutôt que de faire échouer la validation pydantic de l'événement."""
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return 0.5
 
 
 def patches_from_tool_input(tool_input: dict) -> list:

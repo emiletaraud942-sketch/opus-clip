@@ -711,6 +711,13 @@
             const pill = document.createElement('div');
             pill.dataset.idx = String(idx);
             pill.style.cssText = `position:absolute;left:${pct}%;top:20px;transform:translateX(-50%);background:${COLORS[f.value] || '#8b5cf6'};color:#fff;font-size:10px;font-weight:800;padding:4px 8px;border-radius:9999px;cursor:grab;white-space:nowrap;display:flex;align-items:center;gap:6px;`;
+            // A2 : la raison posée par le réalisateur IA s'affiche au survol
+            // (« pourquoi ce zoom est là ») — absente sur les clips plus
+            // anciens ou les cadrages ajoutés à la main, c'est normal.
+            if (f.raison) {
+              const pct100 = typeof f.motivation === 'number' ? Math.round(f.motivation * 100) : null;
+              pill.title = pct100 !== null ? `${f.raison} (motivation ${pct100}%)` : f.raison;
+            }
             pill.innerHTML = `<span data-cycle>${LABELS[f.value] || f.value}</span><span data-del style="cursor:pointer;opacity:.85;">×</span>`;
             track.appendChild(pill);
             let dragging = false, startX = 0;

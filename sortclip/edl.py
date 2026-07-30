@@ -55,6 +55,13 @@ class FramingEvent(BaseModel):
     t: float = Field(ge=0, description="Seconde sur la timeline de SORTIE")
     value: Framing
     transition: Transition = "cut"
+    # A2 : à quel point cet événement est justifié (0-1) + pourquoi, posés par
+    # le réalisateur LLM. Optionnels (défaut neutre 0.5, sans raison) pour
+    # rester rétro-compatibles avec les EDL déjà stockés. Permet à « moins de
+    # zooms » de retirer les événements les MOINS justifiés au lieu d'un
+    # index arbitraire, et affiche la raison au survol dans l'interface.
+    motivation: float = Field(default=0.5, ge=0.0, le=1.0)
+    raison: str = ""
 
 
 class EmphasisEvent(BaseModel):
@@ -63,6 +70,8 @@ class EmphasisEvent(BaseModel):
     t: float = Field(ge=0)
     word_index: int = Field(ge=0, description="Index dans le transcript nettoyé")
     style: Literal["pop", "underline", "scale"] = "pop"
+    motivation: float = Field(default=0.5, ge=0.0, le=1.0)
+    raison: str = ""
 
 
 class HoldOnSpeakerEvent(BaseModel):
