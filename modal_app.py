@@ -569,11 +569,15 @@ def extract_signals(video_path: str) -> dict:
     """Extrait des signaux objectifs de la vidéo (CPU, sans abonnement) :
     - pics d'énergie audio (moments forts) et rires probables ;
     - changements de plan (montage dynamique) ;
-    - présence de visage à l'écran.
+    - présence de visage à l'écran ;
+    - C1 : série temporelle d'énergie z-scorée (rms_times/rms_z), consommée
+      par sortclip.prosody.annotate_transcript pour annoter le transcript
+      envoyé au réalisateur (« énergie +2.1σ » à l'instant du mot).
     Renvoie des listes d'horodatages (secondes). Ne fait jamais échouer le
     pipeline : en cas d'erreur, renvoie des listes vides."""
     signals = {
         "energy_peaks": [], "laughter": [], "shot_changes": [], "face_ratio": None,
+        "rms_times": [], "rms_z": [],
     }
 
     # --- Audio : énergie + rires probables ---
@@ -615,6 +619,13 @@ def extract_signals(video_path: str) -> dict:
                 peaks = [round(float(t), 1) for t, v in zip(times, rms) if v > thr]
                 # On dédoublonne les pics rapprochés (< 2 s).
                 signals["energy_peaks"] = _dedupe_times(peaks, 2.0)
+                # C1 : série z-scorée complète (pas seulement les pics), pour
+                # annoter le transcript avec l'énergie exacte à l'instant de
+                # chaque mot — voir sortclip.prosody.energy_zscore_at.
+                mean_rms = float(np.mean(rms))
+                std_rms = float(np.std(rms)) or 1.0
+                signals["rms_times"] = [round(float(t), 2) for t in times]
+                signals["rms_z"] = [round(float((v - mean_rms) / std_rms), 2) for v in rms]
             # Rires probables : forte énergie + centroïde spectral élevé (rires
             # = bruit large bande aigu). Heuristique, pas une détection exacte.
             cent = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop)[0]
@@ -1176,7 +1187,8 @@ _EDL_Y = {"bas": 0.80, "milieu": 0.50, "haut": 0.16}
 
 def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
                     resolution: str, out_path: str, source_duration: float,
-                    src_wh: tuple[int, int] | None, watermark: bool, tmp: str):
+                    src_wh: tuple[int, int] | None, watermark: bool, tmp: str,
+                    signals: dict | None = None):
     """Rendu d'un clip via le MOTEUR EDL (sortclip). Construit un EDL déclaratif
     pour le segment, en applique le preset (viral -> « rythme », sinon
     « podcast_dynamique ») et les réglages de sous-titres choisis par l'utilisateur,
@@ -1220,8 +1232,27 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
         try:
             from anthropic import Anthropic
             from sortclip import director
+            from sortclip.prosody import annotate_transcript
+
+            # C1 : transcript annoté (énergie/débit/pauses/rires) au lieu du
+            # texte plat, SEULEMENT si `cleaned` (temps SOURCE, même base que
+            # les signaux CPU) et `words_out` (temps SORTIE, utilisé pour
+            # convertir l'index en temps par le réalisateur) ont le même
+            # nombre de mots dans le même ordre — sinon l'index ne
+            # référencerait pas le même mot des deux côtés. map_words_to_output
+            # peut ignorer des mots tombés dans un silence coupé ; dans ce cas
+            # (rare) on retombe sur le transcript plat, jamais bloquant.
+            annotated = None
+            if signals and len(cleaned) == len(words_out):
+                annotated = annotate_transcript(
+                    cleaned,
+                    energy_times=signals.get("rms_times"),
+                    energy_z=signals.get("rms_z"),
+                    laughter_times=signals.get("laughter"),
+                )
+
             client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-            events = director.direct(client, words_out)
+            events = director.direct(client, words_out, annotated_transcript=annotated)
             if events:
                 edl = edl.model_copy(update={"events": events})
         except Exception as exc:
@@ -1478,7 +1509,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                         clip_edl, clip_edl_words = render_clip_edl(
                             local_video, clip, words, style, resolution, out_path,
                             source_duration=duration, src_wh=src_wh,
-                            watermark=watermark, tmp=tmp,
+                            watermark=watermark, tmp=tmp, signals=signals,
                         )
                     except Exception as edl_exc:
                         print(f"[process_video] moteur EDL indisponible pour le clip {i}, repli : {edl_exc}")

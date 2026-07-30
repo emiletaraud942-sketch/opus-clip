@@ -26,7 +26,9 @@ DIRECTOR_SYSTEM = """Tu es réalisateur de clips verticaux courts. On te donne l
 RÈGLES ABSOLUES :
 - Tu ne donnes JAMAIS de temps en secondes. Uniquement des index de mots.
 - Peu d'événements, bien placés, valent mieux que beaucoup. 3 à 6 cadrages pour un clip d'une minute.
-- Ne place pas deux cadrages sur des mots voisins."""
+- Ne place pas deux cadrages sur des mots voisins.
+
+Certains mots portent une annotation entre parenthèses : (énergie +Xσ) = pic d'intensité vocale mesuré, (débit +X%) = accélération du débit de parole par rapport à la moyenne du clip, (pause Xs) = silence avant ce mot, (rire détecté) = rire probable détecté dans l'audio. Un moment fort s'entend avant de se lire : privilégie ces marqueurs pour placer tes zooms — ils sont plus fiables que le texte seul. L'absence de marqueur ne veut rien dire de spécial (peu de mots en portent)."""
 
 DIRECTOR_USER = """CLIP ({n} mots) :
 {indexed}
@@ -158,13 +160,21 @@ def patches_from_tool_input(tool_input: dict) -> list:
 # --------------------------------------------------------------------------
 
 def direct(client, words_out: list[dict], *, hint: str = "",
-           model: str = DIRECTOR_MODEL) -> list:
+           model: str = DIRECTOR_MODEL, annotated_transcript: str | None = None) -> list:
     """Demande au LLM de placer cadrages + emphases. Retourne des événements
-    EDL (à valider ensuite). Ne lève pas : renvoie [] en cas de souci."""
+    EDL (à valider ensuite). Ne lève pas : renvoie [] en cas de souci.
+
+    C1 : si `annotated_transcript` est fourni (sortclip.prosody.annotate_transcript,
+    même index de mots que `words_out`), on l'envoie À LA PLACE du transcript
+    plat — le réalisateur voit alors l'énergie, le débit et les rires détectés
+    à côté de chaque mot, pas seulement le texte. Repli sur le transcript plat
+    si non fourni (comportement inchangé)."""
     if not words_out:
         return []
     try:
-        indexed = " ".join(f"({i}){w['word']}" for i, w in enumerate(words_out))
+        indexed = annotated_transcript or " ".join(
+            f"({i}){w['word']}" for i, w in enumerate(words_out)
+        )
         system = DIRECTOR_SYSTEM + (("\n\n" + hint) if hint else "")
         resp = client.messages.create(
             model=model, max_tokens=1500, temperature=0,
