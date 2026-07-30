@@ -508,6 +508,40 @@ def _snap_to_words(start: float, end: float, words: list) -> tuple[float, float]
     return real_start, real_end
 
 
+def _last_resort_clips(words: list) -> list:
+    """Dernier recours quand ni Claude ni _heuristic_clips n'ont produit un
+    seul clip valide (transcript très épars : mots en petites rafales
+    séparées de longs silences, où aucune rafale individuelle ni aucune
+    tranche égale n'atteint MIN_CLIP_SECONDS). Découpe PAR LE TEMPS, sur tout
+    l'intervalle [premier mot, dernier mot], sans exiger de densité de mots
+    dans chaque segment — un segment qui traverse un long silence n'est pas
+    un problème : ce silence sera retiré au rendu (mécanisme `keeps`).
+    Renvoie [] uniquement si même la vidéo entière fait moins de
+    MIN_CLIP_SECONDS de parole (premier mot à dernier mot)."""
+    if not words:
+        return []
+    start0 = words[0]["start"]
+    end0 = words[-1]["end"]
+    if end0 - start0 < MIN_CLIP_SECONDS:
+        return []
+    clips = []
+    t = start0
+    while t < end0:
+        seg_end = min(t + MAX_CLIP_SECONDS, end0)
+        if seg_end - t >= MIN_CLIP_SECONDS:
+            clips.append({
+                "start": t, "end": seg_end, "title": "Extrait",
+                "score": 50, "reason": "Dernier recours : segment forcé par le temps "
+                                       "(transcript trop épars pour les autres méthodes)",
+            })
+        elif clips:
+            # Reliquat trop court pour un clip séparé : rallonge le précédent
+            # plutôt que de le perdre.
+            clips[-1]["end"] = seg_end
+        t = seg_end
+    return clips
+
+
 def _heuristic_clips(words: list, needed: int) -> list:
     """Solution de secours : découpe la transcription en `needed` segments
     consécutifs d'environ TARGET_SECONDS_PER_CLIP, alignés sur les mots.
@@ -934,11 +968,25 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme exac
         # contexte ne dit pas si le problème vient de peu de mots transcrits,
         # d'une réponse LLM vide/invalide, ou du filet de secours) — toujours
         # flush=True, ce log doit survivre même si le process se termine juste après.
-        print(f"[select_clips_with_llm] échec : {n} mots transcrits, "
+        print(f"[select_clips_with_llm] échec initial : {n} mots transcrits, "
               f"{video_duration:.1f}s de parole, {len(llm_clips)} clip(s) proposé(s) "
               f"par Claude (bruts, avant filtrage), 0 exploitable après filtrage "
               f"et filet de secours.", flush=True)
-        raise RuntimeError("Aucun moment exploitable n'a été trouvé dans cette vidéo.")
+        # Dernier recours (bug réel observé : transcript très épars — mots en
+        # petites rafales séparées de longs silences — où AUCUNE rafale
+        # individuelle n'atteint MIN_CLIP_SECONDS, donc ni Claude ni le filet
+        # de secours par tranches égales n'en tirent de clip valide, alors que
+        # la vidéo a bien assez de contenu au total). On découpe alors de
+        # force par le TEMPS (pas par densité de mots) sur tout l'intervalle
+        # [premier mot, dernier mot] — le silence à l'intérieur sera de toute
+        # façon retiré au rendu (mécanisme `keeps`), donc forcer un clip qui
+        # traverse un silence n'est jamais un problème pour le résultat final.
+        for lc in _last_resort_clips(words):
+            valid_clips.append(lc)
+        if not valid_clips:
+            raise RuntimeError("Aucun moment exploitable n'a été trouvé dans cette vidéo.")
+        print(f"[select_clips_with_llm] dernier recours : {len(valid_clips)} clip(s) "
+              f"forcé(s) par le temps.", flush=True)
 
     valid_clips.sort(key=lambda c: c["score"], reverse=True)
     return valid_clips[:MAX_CLIPS_PER_VIDEO]
