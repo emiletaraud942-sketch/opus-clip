@@ -205,6 +205,24 @@ def test_build_filter_complex_no_duck_without_words():
         compile_mod.ENABLE_AUDIO_CHAIN_H1 = False
 
 
+def test_build_filter_complex_boosts_vocal_presence_during_speech():
+    # Suite au retour utilisateur : on ne peut pas isoler la musique sur une
+    # piste déjà mixée, donc on booste la présence vocale PENDANT la parole
+    # au lieu de baisser la musique (impossible sans séparation de sources).
+    compile_mod.ENABLE_AUDIO_CHAIN_H1 = True
+    try:
+        edl = _edl()
+        words = _words([(0.0, 1.0), (2.0, 3.0)])
+        fc = build_filter_complex(edl, words_out=words)
+        assert f"f={compile_mod.VOCAL_PRESENCE_HZ}" in fc
+        assert f"g={compile_mod.VOCAL_PRESENCE_BOOST_DB}" in fc
+        # Le boost doit être limité aux fenêtres de parole (enable=between),
+        # pas appliqué en continu sur tout le clip.
+        assert fc.count("enable=") >= 2   # au moins 1 duck + 1 boost de présence
+    finally:
+        compile_mod.ENABLE_AUDIO_CHAIN_H1 = False
+
+
 def test_speech_only_filter_single_interval_uses_anull():
     fc, label = _speech_only_filter("ca_out", [(0.0, 1.0)])
     assert "anull" in fc

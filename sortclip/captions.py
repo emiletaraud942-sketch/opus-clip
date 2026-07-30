@@ -24,9 +24,39 @@ ENABLE_FR_LINE_BREAKING = False
 # pause, pas encore prononcés) s'affiche dès le premier mot du groupe — on
 # voit des mots à l'écran pendant que personne ne parle. Un groupe ne doit
 # donc jamais traverser une pause plus longue que ce seuil.
-# {{À_COMPLÉTER : validé visuellement, pas mesuré — 0.6s est le point de
-# départ habituel pour une pause "audible" entre deux groupes de mots.}}
-MAX_CAPTION_PAUSE_GAP = 0.6
+# {{À_COMPLÉTER : validé visuellement, pas mesuré}}. Resserré de 0.6s à 0.3s
+# suite au retour utilisateur (« le seuil est trop large ») — 0.3s correspond
+# à une pause perceptible entre deux groupes de mots sans couper une simple
+# respiration à l'intérieur d'une phrase continue.
+MAX_CAPTION_PAUSE_GAP = 0.3
+
+# Filtre les mots transcrits avec une confiance trop faible (AssemblyAI donne
+# un score 0-1 par mot) AVANT de les sous-titrer. Objectif utilisateur :
+# « sous-titrer les paroles de la personne, pas les paroles de la chanson » —
+# des paroles de musique qui fuitent dans la transcription (chant en fond)
+# sont typiquement mal reconnues (score bas) par rapport à de la parole nette
+# au micro. Ce n'est PAS une détection musique/parole (aucun modèle audio) :
+# c'est un usage du signal de confiance qu'AssemblyAI fournit déjà, pour de
+# vraies raisons statistiques (audio dégradé/chanté = confiance plus basse).
+# {{À_COMPLÉTER : seuil pas validé sur de vrais clips avec musique — 0.4 est
+# un point de départ prudent (n'exclut que les mots vraiment incertains).}}
+MIN_CAPTION_CONFIDENCE = 0.4
+
+
+def filter_low_confidence_words(words_out: list[dict],
+                                min_confidence: float = MIN_CAPTION_CONFIDENCE) -> list[dict]:
+    """Retire les mots dont le score de confiance (AssemblyAI, `confidence`
+    0-1) est en dessous du seuil — jamais pour les mots SANS confiance connue
+    (clips déjà transcrits avant l'ajout de ce champ, ou toute source qui ne
+    le fournit pas) : on ne filtre que ce qu'on peut réellement juger,
+    jamais par excès de prudence sur une donnée absente."""
+    out = []
+    for w in words_out:
+        c = w.get("confidence")
+        if c is not None and float(c) < min_confidence:
+            continue
+        out.append(w)
+    return out
 
 
 def group_words_by_pause(words_out: list[dict], max_words: int | None = None,
@@ -95,7 +125,10 @@ def map_words_to_output(words: list[dict], edl_or_keeps) -> list[dict]:
                 out_start = acc[i] + (cs - k.start)
                 out_end = acc[i] + (ce - k.start)
                 if out_end > out_start:
-                    out.append({"word": w.get("word", ""), "start": out_start, "end": out_end})
+                    mapped = {"word": w.get("word", ""), "start": out_start, "end": out_end}
+                    if "confidence" in w:
+                        mapped["confidence"] = w["confidence"]
+                    out.append(mapped)
                 break
     return out
 
@@ -152,6 +185,7 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
     """
     from pathlib import Path
 
+    words_out = filter_low_confidence_words(words_out)
     lines = [_ass_header(captions, canvas)]
 
     if captions.style == "karaoke" or not ENABLE_FR_LINE_BREAKING:

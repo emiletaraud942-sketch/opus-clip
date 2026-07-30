@@ -69,9 +69,24 @@ SPEECH_MERGE_GAP_SECONDS = 0.35
 # Sous ce seuil, un "trou" entre deux passages parlés est trop court pour
 # qu'une baisse de volume s'entende autrement que comme un artefact de pompage.
 MIN_DUCK_GAP_SECONDS = 0.5
-# {{À_COMPLÉTER : validé à l'oreille — -5dB est un point de départ prudent
-# (perceptible mais pas un "trou" audible), à ajuster sur de vrais clips.}}
-DUCK_NON_SPEECH_DB = -5.0
+# {{À_COMPLÉTER : validé à l'oreille}}. Renforcé de -5dB à -8dB suite au
+# retour utilisateur (« je veux entendre clairement la personne qui parle » —
+# demande une différenciation plus marquée entre parole et musique seule).
+DUCK_NON_SPEECH_DB = -8.0
+
+# Ce qu'on ne peut PAS faire sans séparation de sources : baisser SEULEMENT la
+# musique pendant que la voix continue, en laissant la voix intacte — les deux
+# sont sur la MÊME piste mixée, toute baisse de volume pendant la parole
+# baisserait aussi la voix elle-même. Le vrai "ducking" radio (musique baissée
+# sous la voix) suppose deux pistes séparées ; on n'en a qu'une. Approximation
+# honnête, sans séparation de sources : booster la bande de fréquences où vit
+# l'intelligibilité de la parole (présence des consonnes, ~2-3kHz) PENDANT les
+# passages parlés seulement. Ça n'éteint pas la musique, mais ça rend la voix
+# relativement plus nette dessus — un vrai levier FFmpeg déterministe, pas une
+# fausse promesse de séparation qu'on ne peut pas tenir ici.
+# {{À_COMPLÉTER : fréquence/gain pas validés à l'oreille sur de vrais clips.}}
+VOCAL_PRESENCE_HZ = 2800
+VOCAL_PRESENCE_BOOST_DB = 4.0
 
 
 def speech_intervals_from_words(words_out: list[dict],
@@ -276,6 +291,15 @@ def build_filter_complex(edl: EDL, ass_path: str | None = None,
             for gap_start, gap_end in gaps:
                 audio_chain.append(
                     f"volume={DUCK_NON_SPEECH_DB}dB:enable='between(t,{gap_start:.3f},{gap_end:.3f})'"
+                )
+            # Boost de présence vocale PENDANT les passages parlés (voir
+            # commentaire plus haut : on ne peut pas isoler la musique sur une
+            # piste déjà mixée, donc on rend la voix relativement plus nette
+            # au lieu d'essayer d'éteindre la musique sous elle).
+            for speech_start, speech_end in intervals:
+                audio_chain.append(
+                    f"equalizer=f={VOCAL_PRESENCE_HZ}:width_type=o:width=1.5:"
+                    f"g={VOCAL_PRESENCE_BOOST_DB}:enable='between(t,{speech_start:.3f},{speech_end:.3f})'"
                 )
         if loudness_measurement:
             m = loudness_measurement

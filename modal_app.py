@@ -470,7 +470,8 @@ def transcribe(video_path: str):
         raise RuntimeError(f"Échec transcription AssemblyAI : {transcript.error}")
 
     words = [
-        {"word": w.text, "start": w.start / 1000, "end": w.end / 1000}
+        {"word": w.text, "start": w.start / 1000, "end": w.end / 1000,
+         "confidence": getattr(w, "confidence", None)}
         for w in transcript.words
     ]
 
