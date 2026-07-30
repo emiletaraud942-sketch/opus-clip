@@ -381,13 +381,50 @@ def build_filter_complex(edl: EDL, ass_path: str | None = None,
     return ";".join(parts)
 
 
+def _rotation_degrees(stream: dict) -> int:
+    """Angle de rotation déclaré par la vidéo (métadonnée, PAS un calcul sur
+    les pixels) : les vidéos filmées au téléphone en portrait sont souvent
+    ENCODÉES en paysage avec un tag de rotation à 90/270° pour être affichées
+    correctement — ffprobe ne renvoie par défaut que les dimensions du flux
+    encodé, PAS les dimensions réellement affichées. Ignorer cette métadonnée
+    fait calculer un cadrage sur le mauvais ratio d'aspect -> image étirée
+    (bug réel signalé : "l'image est totalement déformée"). Cherche dans les
+    deux emplacements possibles (tag `rotate` classique, ou `side_data_list`
+    avec `rotation`, format moderne) ; renvoie 0 si absent."""
+    tags = stream.get("tags") or {}
+    if "rotate" in tags:
+        try:
+            return int(float(tags["rotate"])) % 360
+        except (TypeError, ValueError):
+            pass
+    for side_data in stream.get("side_data_list") or []:
+        if "rotation" in side_data:
+            try:
+                return int(float(side_data["rotation"])) % 360
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
 def probe_source(path: str) -> tuple[int, int]:
-    out = subprocess.run(
+    """Dimensions RÉELLEMENT AFFICHÉES de la vidéo (largeur, hauteur) — pas
+    forcément les dimensions du flux encodé : si une rotation de 90/270° est
+    déclarée (cas fréquent des vidéos filmées au téléphone en portrait,
+    encodées en paysage), largeur et hauteur sont inversées pour refléter ce
+    que le lecteur affiche réellement. Sans ça, foreground_size()/le
+    recadrage calculent sur le mauvais ratio d'aspect -> image déformée."""
+    result = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+         "-show_entries", "stream=width,height:stream_tags=rotate:stream_side_data=rotation",
+         "-of", "json", path],
         capture_output=True, text=True, check=True,
-    ).stdout.strip().split(",")
-    return int(out[0]), int(out[1])
+    )
+    data = json.loads(result.stdout)
+    stream = (data.get("streams") or [{}])[0]
+    width, height = int(stream["width"]), int(stream["height"])
+    if _rotation_degrees(stream) in (90, 270):
+        width, height = height, width
+    return width, height
 
 
 def _even(x: float) -> int:
