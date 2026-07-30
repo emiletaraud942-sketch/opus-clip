@@ -930,6 +930,14 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme exac
                 break
 
     if not valid_clips:
+        # Diagnostic explicite (bug déjà rencontré : cette erreur sans aucun
+        # contexte ne dit pas si le problème vient de peu de mots transcrits,
+        # d'une réponse LLM vide/invalide, ou du filet de secours) — toujours
+        # flush=True, ce log doit survivre même si le process se termine juste après.
+        print(f"[select_clips_with_llm] échec : {n} mots transcrits, "
+              f"{video_duration:.1f}s de parole, {len(llm_clips)} clip(s) proposé(s) "
+              f"par Claude (bruts, avant filtrage), 0 exploitable après filtrage "
+              f"et filet de secours.", flush=True)
         raise RuntimeError("Aucun moment exploitable n'a été trouvé dans cette vidéo.")
 
     valid_clips.sort(key=lambda c: c["score"], reverse=True)
@@ -1511,6 +1519,9 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                 reservations = reserve_minutes(supabase, user_id, plan, source_path, need_minutes)
 
             words, full_text = transcribe(local_video)
+            video_duration = (words[-1]["end"] - words[0]["start"]) if words else 0.0
+            print(f"[process_video] transcription : {len(words)} mots, "
+                  f"{video_duration:.1f}s de parole détectée.", flush=True)
             if not words:
                 raise RuntimeError("Aucune parole détectée dans cette vidéo — impossible de générer des clips.")
 
