@@ -1,0 +1,11 @@
+{"words": [
+  {"word": "bonjour", "start": 0.00, "end": 0.40},
+  {"word": "tout", "start": 0.45, "end": 0.65},
+  {"word": "le", "start": 0.65, "end": 0.80},
+  {"word": "monde", "start": 0.80, "end": 1.10},
+  {"word": "aujourd'hui", "start": 1.50, "end": 2.00},
+  {"word": "on", "start": 2.00, "end": 2.10},
+  {"word": "parle", "start": 2.10, "end": 2.40},
+  {"word": "de", "start": 2.40, "end": 2.50},
+  {"word": "sous-titres", "start": 2.50, "end": 3.10}
+]}

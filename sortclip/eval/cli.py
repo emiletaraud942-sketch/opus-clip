@@ -38,6 +38,13 @@ from .metrics import (
     instruction_satisfaction,
     is_stable,
 )
+from .subs import list_subs_clips
+from .subs_metrics import (
+    word_error_rate,
+    timestamp_offsets,
+    offset_median_and_stddev,
+    offset_trend,
+)
 
 
 def _evaluate_clip(clip: GoldenClip) -> dict:
@@ -120,6 +127,78 @@ def cmd_run(args: argparse.Namespace) -> int:
         out_path = out_dir / f"{args.set}-{int(time.time())}.json"
         out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
         print(f"[eval] rapport écrit : {out_path}")
+
+    return 0
+
+
+def _evaluate_subs_clip(clip) -> dict:
+    """Partie 0.2/0.3 (correction-sous-titres) : WER + profil de décalage
+    pour un clip du jeu evals/subs/. Sans candidat (pas de rendu réel
+    disponible ici), on ne peut rien calculer — signalé explicitement."""
+    result = {"clip_id": clip.clip_id, "category": clip.category}
+    if clip.candidate_words is None:
+        result["status"] = "no_candidate"
+        result["note"] = (
+            "Aucune transcription candidate rejouée pour ce clip (nécessite "
+            "l'API AssemblyAI + la source vidéo réelle, indisponibles dans cet "
+            "environnement). WER et profil de décalage non calculables."
+        )
+        return result
+
+    result["status"] = "evaluated"
+    ref = clip.reference_words
+    cand = clip.candidate_words
+    result["wer"] = round(word_error_rate(
+        [w["word"] for w in cand], [w["word"] for w in ref]), 4)
+
+    offsets_with_time = [
+        (ref[i]["start"], cand[i]["start"] - ref[i]["start"])
+        for i in range(min(len(ref), len(cand)))
+    ]
+    offsets = [o for _, o in offsets_with_time]
+    median, std = offset_median_and_stddev(offsets)
+    result["offset_median_seconds"] = round(median, 4)
+    result["offset_stddev_seconds"] = round(std, 4)
+    result["offset_profile"] = offset_trend(offsets_with_time)
+    return result
+
+
+def cmd_subs(args: argparse.Namespace) -> int:
+    t0 = time.time()
+    clips = list_subs_clips()
+    per_clip = [_evaluate_subs_clip(c) for c in clips]
+    evaluated = [r for r in per_clip if r["status"] == "evaluated"]
+
+    summary = {
+        "n_clips_declared": len(clips),
+        "n_clips_evaluated": len(evaluated),
+        "elapsed_seconds": round(time.time() - t0, 2),
+        "clips": per_clip,
+    }
+    if evaluated:
+        for key in ("wer", "offset_median_seconds", "offset_stddev_seconds"):
+            vals = [r[key] for r in evaluated if key in r]
+            if vals:
+                summary[f"mean_{key}"] = round(sum(vals) / len(vals), 4)
+        profiles = [r["offset_profile"] for r in evaluated]
+        summary["offset_profiles"] = {p: profiles.count(p) for p in set(profiles)}
+
+    print(f"[eval subs] {len(clips)} clip(s) déclaré(s), {len(evaluated)} évalué(s), "
+          f"en {summary['elapsed_seconds']}s.")
+    if len(clips) == 0:
+        print("[eval subs] AUCUN clip dans evals/subs/ — voir evals/subs/README.md : "
+              "le jeu de 12 clips réels demandé n'a pas pu être constitué en autonomie.")
+    elif not evaluated:
+        print("[eval subs] Aucun clip n'a de transcription candidate rejouée : rien à "
+              "mesurer tant qu'un appel réel (API AssemblyAI + vraie source vidéo) "
+              "n'est pas rejoué. Voir la note par clip dans le rapport.")
+
+    if args.report:
+        out_dir = Path("evals/reports")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"subs-{int(time.time())}.json"
+        out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(f"[eval subs] rapport écrit : {out_path}")
 
     return 0
 
@@ -223,6 +302,10 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--set", default="golden")
     p_run.add_argument("--report", action="store_true")
     p_run.set_defaults(func=cmd_run)
+
+    p_subs = sub.add_parser("subs", help="Évalue le jeu de test de sous-titrage (evals/subs/).")
+    p_subs.add_argument("--report", action="store_true")
+    p_subs.set_defaults(func=cmd_subs)
 
     p_cmp = sub.add_parser("compare", help="Compare deux rapports JSON.")
     p_cmp.add_argument("--baseline", required=True, help="Chemin du rapport JSON de référence.")
