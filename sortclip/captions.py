@@ -13,10 +13,12 @@ Couleurs ASS : format &H00BBGGRR (Alpha=00, puis Bleu, Vert, Rouge — inversé)
 
 from __future__ import annotations
 
-# H2 — DÉSACTIVÉ pour ce merge : change le rendu visuel des sous-titres en
-# style "plain" pour tous les clips existants ; à valider visuellement en
-# prod avant activation (repasser à True). Le code reste en place et testé.
-ENABLE_FR_LINE_BREAKING = False
+# H2 — ACTIVÉ pour test manuel en prod sur Modal, à la demande de
+# l'utilisateur. Change le rendu visuel des sous-titres en style "plain"
+# (découpage linguistique français au lieu du découpage fixe par nombre de
+# mots). Réversible en un mot (repasser à False) si le résultat ne convient
+# pas — voir rapport du chantier refonte-ia.
+ENABLE_FR_LINE_BREAKING = True
 
 # Bug signalé par l'utilisateur : le regroupement par nombre de mots fixe
 # (words_per_line) ignore le SILENCE entre deux mots. Si une pause tombe au
@@ -180,8 +182,8 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
       déterminant et nom, jamais après une forme élidée, "ne...pas" toujours
       ensemble, jamais un mot d'1-2 lettres isolé en fin de ligne), deux
       lignes par bloc maximum, typographie française (espaces insécables).
-      DÉSACTIVÉ pour l'instant (ENABLE_FR_LINE_BREAKING = False) : repli sur
-      l'ancien découpage fixe par `words_per_line`, identique à avant ce chantier.
+      ACTIVÉ (ENABLE_FR_LINE_BREAKING = True) — repasser à False pour
+      revenir à l'ancien découpage fixe par `words_per_line` si besoin.
     """
     from pathlib import Path
 
