@@ -20,11 +20,12 @@ from pathlib import Path
 
 from .edl import EDL, FRAMING_ZOOM
 
-# H1 — DÉSACTIVÉ pour ce merge : non testé sur média réel (pas de ffmpeg
-# disponible pendant le développement), seuils non validés à l'oreille sur
-# de vraies voix. Le code reste en place, prêt à être activé une fois validé
-# manuellement en prod (repasser à True) — voir rapport du chantier refonte-ia.
-ENABLE_AUDIO_CHAIN_H1 = False
+# H1 — ACTIVÉ pour test manuel en prod sur Modal (ffmpeg réel). Seuils non
+# encore validés à l'oreille sur de vraies voix : à écouter et ajuster
+# (LOUDNORM_TARGET_I, _DEESS_FREQ_HZ, _DEESS_GAIN_DB ci-dessous) si besoin.
+# Repasser à False si le résultat ne convient pas — aucun risque, c'est
+# réversible en un mot (voir rapport du chantier refonte-ia).
+ENABLE_AUDIO_CHAIN_H1 = True
 
 # H1 — chaîne audio. Coût nul (aucun GPU, du FFmpeg pur), effet perçu fort : le
 # format court se consomme au volume maximum, dans le bruit. Cible EBU R128.

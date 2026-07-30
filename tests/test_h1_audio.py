@@ -38,14 +38,20 @@ def test_filter_complex_ends_with_out_unchanged_contract():
     assert fc.endswith("[out]")
 
 
-def test_audio_chain_disabled_by_default():
-    # Le merge a activé ENABLE_AUDIO_CHAIN_H1 = False (non validé sur média
-    # réel) : [ca] doit être recopié tel quel vers [caf], sans traitement.
-    assert compile_mod.ENABLE_AUDIO_CHAIN_H1 is False
-    fc = build_filter_complex(_edl())
-    assert "[caf]" in fc
-    assert "highpass=f=80" not in fc
-    assert "loudnorm=" not in fc
+def test_audio_chain_toggle_controls_filter_graph():
+    # Le flag ENABLE_AUDIO_CHAIN_H1 est une bascule manuelle de test (peut
+    # valoir True le temps d'une écoute en prod, cf. rapport du chantier) :
+    # ce test vérifie que le graphe suit bien la valeur ACTUELLE du flag,
+    # sans supposer laquelle est en place au moment du test.
+    original = compile_mod.ENABLE_AUDIO_CHAIN_H1
+    try:
+        compile_mod.ENABLE_AUDIO_CHAIN_H1 = False
+        fc_off = build_filter_complex(_edl())
+        assert "[caf]" in fc_off
+        assert "highpass=f=80" not in fc_off
+        assert "loudnorm=" not in fc_off
+    finally:
+        compile_mod.ENABLE_AUDIO_CHAIN_H1 = original
 
 
 def test_filter_complex_contains_audio_chain_when_enabled():
