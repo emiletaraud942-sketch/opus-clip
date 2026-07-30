@@ -1,1 +1,2 @@
 reports/*.json
+!reports/baseline_initial.json
