@@ -49,6 +49,30 @@ def test_global_hard_cap():
         assert cfg["max_video_seconds"] <= pc.GLOBAL_MAX_SOURCE_SECONDS, name
 
 
+# --- Audit E4 (AUDIT.md #1) : le modèle de coût doit couvrir le calcul et le
+# stockage, pas seulement le LLM et la transcription. ------------------------
+
+def test_compute_cost_eur_scales_with_time():
+    assert pc.compute_cost_eur(0) == 0
+    assert pc.compute_cost_eur(100) > pc.compute_cost_eur(10)
+    assert pc.compute_cost_eur(60, vcpus=4) == 2 * pc.compute_cost_eur(60, vcpus=2)
+
+
+def test_storage_cost_eur_scales_with_bytes_and_retention():
+    one_gb = 1024 ** 3
+    assert pc.storage_cost_eur(0, retention_days=30) == 0
+    assert pc.storage_cost_eur(one_gb, retention_days=30) > 0
+    # Deux fois plus de rétention -> deux fois le coût de stockage.
+    cost_30d = pc.storage_cost_eur(one_gb, retention_days=30)
+    cost_60d = pc.storage_cost_eur(one_gb, retention_days=60)
+    assert abs(cost_60d - 2 * cost_30d) < 1e-9
+
+
+def test_cost_model_constants_are_positive():
+    assert pc.MODAL_CPU_EUR_PER_CPU_SECOND > 0
+    assert pc.SUPABASE_STORAGE_EUR_PER_GB_MONTH > 0
+
+
 if __name__ == "__main__":
     for name in list(globals()):
         if name.startswith("test_"):

@@ -144,6 +144,42 @@ def transcription_cost_eur(source_seconds: float) -> float:
     return (source_seconds / 60.0) * ASSEMBLYAI_USD_PER_MINUTE * USD_TO_EUR
 
 
+# --- Audit E4 (AUDIT.md #1) --------------------------------------------
+# processing_costs ne capturait QUE cost_llm_eur + cost_transcription_eur —
+# aucune ligne ne mesurait le calcul (FFmpeg/librosa/opencv, facturé par
+# Modal au CPU-seconde/GPU-seconde) ni le stockage Supabase, alors que le
+# calcul vidéo est très probablement la part dominante du coût réel d'un
+# SaaS de traitement vidéo (bien plus que les tokens LLM — voir
+# audit/repro_e4_cost_model.py : l'estimation LLM+transcription seule tombe
+# à ~0,008 €/min, huit fois sous les 0,03 €/min supposés). Sans mesurer le
+# calcul et le stockage, la validation de COST_PER_SOURCE_MINUTE_EUR par la
+# télémétrie était structurellement impossible.
+#
+# {{À_COMPLÉTER}} : les deux tarifs ci-dessous sont des ESTIMATIONS à partir
+# des tarifs publics Modal/Supabase au moment de l'écriture, PAS calibrées
+# contre une vraie facture — à corriger dès qu'une facture Modal/Supabase
+# réelle est disponible pour comparaison.
+MODAL_CPU_EUR_PER_CPU_SECOND = 0.0000131 * USD_TO_EUR  # ~$0.0000131/vCPU-s (Modal, tarif CPU standard)
+SUPABASE_STORAGE_EUR_PER_GB_MONTH = 0.021 * USD_TO_EUR  # ~$0.021/Go/mois (Supabase Storage)
+
+
+def compute_cost_eur(wall_seconds: float, vcpus: float = 2.0) -> float:
+    """Coût ESTIMÉ du calcul Modal (FFmpeg + signaux CPU) pour un traitement,
+    à partir du temps mesuré (wall-clock) et d'une hypothèse de nombre de
+    vCPU alloués (2 par défaut — à ajuster selon la config réelle de la
+    fonction Modal). Ne couvre PAS un éventuel GPU (non utilisé aujourd'hui,
+    voir modal_app.py : encodeur libx264 CPU par défaut)."""
+    return wall_seconds * vcpus * MODAL_CPU_EUR_PER_CPU_SECOND
+
+
+def storage_cost_eur(total_bytes: int, retention_days: float) -> float:
+    """Coût ESTIMÉ du stockage Supabase pour la durée de rétention réelle
+    (pas un mois entier si la rétention est plus courte, ex. 72h en gratuit)."""
+    gb = total_bytes / (1024 ** 3)
+    months = retention_days / 30.0
+    return gb * months * SUPABASE_STORAGE_EUR_PER_GB_MONTH
+
+
 def plan_minutes(plan: str) -> int:
     return PLANS.get(plan, PLANS["free"])["minutes"]
 

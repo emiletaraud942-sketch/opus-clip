@@ -89,9 +89,19 @@ ENABLE_AUTO_DIRECTOR = False
 # vidéos » (PLAN_MONTHLY_LIMITS) a été retiré : il ne reflétait plus le modèle
 # tarifaire réel et n'était plus appelé.
 
-# Comptes exemptés de la facturation (phase de test uniquement) — à vider une
-# fois les tests terminés pour que les quotas s'appliquent à tous.
-TEST_ACCOUNT_EMAILS = {"emiletaraud942@gmail.com"}
+# Audit E5 (AUDIT.md #3) : un bypass de facturation codé en dur (un email
+# précis) traînait ici, marqué "à vider" mais jamais retiré — risque de fuite
+# de revenu silencieuse s'il est oublié. Remplacé par une liste lue depuis un
+# secret Modal (SORTCLIP_TEST_ACCOUNT_EMAILS, emails séparés par des
+# virgules), VIDE PAR DÉFAUT si le secret n'est pas positionné : plus aucun
+# bypass n'existe tant que quelqu'un ne l'active pas explicitement et
+# consciemment au niveau de l'infrastructure (pas dans ce fichier). Chaque
+# utilisation est journalisée (voir plus bas) pour rester auditable.
+TEST_ACCOUNT_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("SORTCLIP_TEST_ACCOUNT_EMAILS", "").split(",")
+    if e.strip()
+}
 
 ALLOWED_ORIGINS = [
     "https://sortclip.fr",
@@ -380,11 +390,31 @@ def enforce_source_caps(plan: str, seconds: float):
         )
 
 
-def count_active_jobs(supabase, user_id: str) -> int:
-    return (
-        supabase.table("clip_jobs").select("id", count="exact")
-        .eq("user_id", user_id).eq("status", "processing").execute().count or 0
-    )
+# Audit A3/E5 (AUDIT.md #2) : count_active_jobs() lisait le compteur de jobs
+# actifs de façon SÉPARÉE de l'insertion qui le fait grimper (celle-ci n'avait
+# lieu que dans process_video, APRÈS le spawn asynchrone) — deux requêtes
+# rapprochées passaient toutes les deux la vérification avant qu'aucune ne
+# s'enregistre. Remplacé par reserve_processing_slot(), qui vérifie ET
+# enregistre dans une seule transaction Postgres verrouillée par utilisateur
+# (supabase/schema_race_fix.sql) — voir reserve_processing_slot() plus bas.
+def reserve_processing_slot(supabase, user_id: str, source_path: str,
+                            max_concurrent: int, plan_minutes: float,
+                            needed_minutes: float) -> dict:
+    """Réserve ATOMIQUEMENT une place de traitement (concurrence) et,
+    optionnellement, une estimation de quota — via la fonction Postgres
+    reserve_processing_slot (verrou transactionnel par utilisateur, ferme la
+    course entre la vérification et l'enregistrement). Renvoie
+    {"allowed": bool, "reason": str|None, ...}. `needed_minutes=0` désactive
+    la vérification de quota (cas YouTube : durée inconnue avant téléchargement)."""
+    result = supabase.rpc("reserve_processing_slot", {
+        "p_user_id": user_id, "p_source_path": source_path,
+        "p_max_concurrent": max_concurrent, "p_plan_minutes": plan_minutes,
+        "p_needed_minutes": needed_minutes,
+    }).execute()
+    data = result.data
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return data or {"allowed": False, "reason": "rpc_empty_response"}
 
 
 def reserve_minutes(supabase, user_id: str, plan: str, source_id: str, minutes: float) -> list:
@@ -1227,6 +1257,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
+# Audit C4 (AUDIT.md #4) : voir sortclip/captions.py::_sanitize_ass_text pour
+# le détail — même risque ici (un mot avec `{`, `}` ou `\` casse le format
+# ASS), même neutralisation.
+_ASS_UNSAFE_TRANSLATION = str.maketrans({"{": "｛", "}": "｝", "\\": "＼"})
+
+
+def _sanitize_ass_text(text: str) -> str:
+    return (text or "").translate(_ASS_UNSAFE_TRANSLATION)
+
+
 def write_subtitles(words: list, segments: list, path: str, style: dict):
     """Génère un fichier de sous-titres .ass, avec les horodatages remappés
     sur le montage compressé (silences retirés). Couleur uniforme (celle
@@ -1245,7 +1285,7 @@ def write_subtitles(words: list, segments: list, path: str, style: dict):
             return
         start = remap_time(chunk[0]["start"], segments)
         end = remap_time(chunk[-1]["end"], segments)
-        text = " ".join(w["word"] for w in chunk)
+        text = " ".join(_sanitize_ass_text(w["word"]) for w in chunk)
         lines.append(f"Dialogue: 0,{fmt_ass_time(start)},{fmt_ass_time(end)},Default,,0,0,0,,{fade}{text}")
 
     for w in words:
@@ -1483,9 +1523,9 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
     # l'active que pour eux.
     allow_proxy = plan == "equipe"
 
-    supabase.table("clip_jobs").insert({
-        "user_id": user_id, "source_path": source_path, "status": "processing",
-    }).execute()
+    # La ligne clip_jobs (status="processing") a déjà été insérée de façon
+    # ATOMIQUE par reserve_processing_slot() dans l'endpoint process(), avant
+    # ce spawn (AUDIT.md #2) — ne plus la réinsérer ici éviterait un doublon.
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1591,6 +1631,8 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             )
 
             rows = []
+            total_output_bytes = 0
+            render_wall_start = time.time()
             for i, clip in enumerate(clips):
                 try:
                     out_path = os.path.join(tmp, f"clip_{i}.mp4")
@@ -1609,6 +1651,10 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                         render_clip(local_video, clip, words, style, resolution, out_path, watermark=watermark)
 
                     storage_path = f"{user_id}/{Path(source_path).stem}_clip{i}.mp4"
+                    try:
+                        total_output_bytes += os.path.getsize(out_path)
+                    except OSError:
+                        pass
                     with open(out_path, "rb") as f:
                         supabase.storage.from_(CLIPS_BUCKET).upload(
                             storage_path, f, {"content-type": "video/mp4", "upsert": "true"}
@@ -1644,6 +1690,8 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     print(f"[process_video] Échec du montage du clip {i}: {clip_exc}")
                     continue
 
+            render_wall_seconds = time.time() - render_wall_start
+
             if not rows:
                 raise RuntimeError("Aucun clip n'a pu être monté avec succès pour cette vidéo.")
 
@@ -1670,13 +1718,27 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
 
         # Télémétrie de coût RÉEL (Phase 3) : sert à valider ou invalider
         # COST_PER_SOURCE_MINUTE_EUR. N'échoue jamais le traitement.
+        #
+        # Audit E4 (AUDIT.md #1) : cost_total_eur ne capturait QUE le LLM et
+        # la transcription — jamais le calcul (FFmpeg/librosa/opencv, mesuré
+        # ici par le temps réel passé à monter les clips) ni le stockage
+        # (mesuré par la taille des fichiers uploadés et la rétention du
+        # plan). Ce sont des ESTIMATIONS (pricing_config.compute_cost_eur/
+        # storage_cost_eur, tarifs Modal/Supabase publics non calibrés contre
+        # une vraie facture — voir {{À_COMPLÉTER}} dans pricing_config.py),
+        # mais la structure est désormais complète : plus aucune composante
+        # de coût connue n'est absente de cost_total_eur.
         try:
             cost_llm = sum(
                 pricing.llm_cost_eur(u["model"], u["input"], u["output"])
                 for u in usage_sink
             )
             cost_transcription = pricing.transcription_cost_eur(duration)
-            cost_total = cost_llm + cost_transcription
+            cost_compute = pricing.compute_cost_eur(render_wall_seconds)
+            cost_storage = pricing.storage_cost_eur(
+                total_output_bytes, pricing.plan_retention_hours(plan) / 24.0
+            )
+            cost_total = cost_llm + cost_transcription + cost_compute + cost_storage
             supabase.table("processing_costs").insert({
                 "user_id": user_id,
                 "source_id": source_path,
@@ -1684,6 +1746,8 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                 "source_duration_s": duration,
                 "cost_llm_eur": round(cost_llm, 5),
                 "cost_transcription_eur": round(cost_transcription, 5),
+                "cost_compute_eur": round(cost_compute, 5),
+                "cost_storage_eur": round(cost_storage, 5),
                 "cost_total_eur": round(cost_total, 5),
             }).execute()
         except Exception as tel_exc:
@@ -1736,24 +1800,20 @@ def process():
             user_id, email = auth_result
 
             supabase = get_supabase_client()
-            skip_billing = email in TEST_ACCOUNT_EMAILS
+            skip_billing = email.strip().lower() in TEST_ACCOUNT_EMAILS
+            if skip_billing:
+                # Auditable : chaque utilisation du bypass de facturation
+                # doit être visible dans les logs, jamais silencieuse.
+                print(f"[process] bypass de facturation actif pour {email} "
+                      f"(SORTCLIP_TEST_ACCOUNT_EMAILS)", flush=True)
             plan = get_user_plan(supabase, user_id)
-
-            # Garde-fou : traitements simultanés limités par plan.
-            if not skip_billing and count_active_jobs(supabase, user_id) >= pricing.plan_concurrency(plan):
-                return JSONResponse({
-                    "error": (
-                        f"Tu as déjà {pricing.plan_concurrency(plan)} traitement(s) en "
-                        f"cours (maximum du plan « {plan} »). Attends qu'ils se terminent."
-                    ),
-                    "code": "too_many_concurrent",
-                }, status_code=429)
 
             # Portée UX synchrone (upload) : le front envoie la durée lue via la
             # balise <video>. On refuse AVANT tout traitement si la vidéo dépasse
-            # le plafond ou si le solde de minutes est insuffisant. Le contrôle
-            # AUTORITAIRE (ffprobe/yt-dlp) est refait côté traitement.
+            # le plafond dur. Le contrôle AUTORITAIRE (ffprobe/yt-dlp) est refait
+            # côté traitement (enforce_source_caps rappelé dans process_video).
             hint = payload.get("sourceDurationSeconds")
+            needed_minutes = 0.0
             if hint and not skip_billing:
                 try:
                     seconds = float(hint)
@@ -1767,20 +1827,7 @@ def process():
                             {"error": str(cap_err), "code": "video_too_long"},
                             status_code=403,
                         )
-                    need = seconds / 60.0
-                    avail = available_minutes(supabase, user_id, plan)
-                    if need > avail + 1e-6:
-                        return JSONResponse({
-                            "error": (
-                                f"Il te reste {avail:.0f} min et cette vidéo en demande "
-                                f"{need:.0f}. Recharge avec le pack crédits (60 min, 7,90 €) "
-                                "ou passe à un plan supérieur."
-                            ),
-                            "code": "insufficient_minutes",
-                            "proposePack": True,
-                            "availableMinutes": round(avail, 1),
-                            "neededMinutes": round(need, 1),
-                        }, status_code=403)
+                    needed_minutes = seconds / 60.0
 
             subtitle_style = resolve_subtitle_style(payload.get("subtitleStyle"))
             # Preset créateur optionnel, activé par génération (case à cocher).
@@ -1790,17 +1837,52 @@ def process():
                 preset = None
 
             youtube_url = payload.get("youtubeUrl")
+            source_path = (f"{user_id}/youtube_{int(time.time())}" if youtube_url
+                          else payload["path"])
+            if not youtube_url and not source_path.startswith(f"{user_id}/"):
+                return JSONResponse({"error": "Chemin invalide"}, status_code=403)
+
+            # Garde-fou de concurrence ET estimation de quota, réservés de façon
+            # ATOMIQUE (verrou transactionnel par utilisateur côté Postgres) —
+            # ferme la course entre la vérification et l'enregistrement qui
+            # permettait de dépasser son quota/sa concurrence par double-clic
+            # (AUDIT.md #2). skip_billing : concurrence quasi illimitée, pas de
+            # vérification de quota, mais la réservation elle-même (insertion
+            # clip_jobs) a toujours lieu ici pour que le compteur reste exact.
+            max_concurrent = 10_000 if skip_billing else pricing.plan_concurrency(plan)
+            slot = reserve_processing_slot(
+                supabase, user_id, source_path, max_concurrent,
+                pricing.plan_minutes(plan), 0.0 if skip_billing else needed_minutes,
+            )
+            if not slot.get("allowed"):
+                reason = slot.get("reason")
+                if reason == "insufficient_minutes":
+                    avail = slot.get("available", 0.0)
+                    return JSONResponse({
+                        "error": (
+                            f"Il te reste {avail:.0f} min et cette vidéo en demande "
+                            f"{needed_minutes:.0f}. Recharge avec le pack crédits (60 min, "
+                            "7,90 €) ou passe à un plan supérieur."
+                        ),
+                        "code": "insufficient_minutes",
+                        "proposePack": True,
+                        "availableMinutes": round(avail, 1),
+                        "neededMinutes": round(needed_minutes, 1),
+                    }, status_code=403)
+                return JSONResponse({
+                    "error": (
+                        f"Tu as déjà {max_concurrent} traitement(s) en cours "
+                        f"(maximum du plan « {plan} »). Attends qu'ils se terminent."
+                    ),
+                    "code": "too_many_concurrent",
+                }, status_code=429)
+
             if youtube_url:
                 # Pour YouTube, la durée n'est pas connue côté client : le
                 # contrôle (plafond + solde) est fait dans process_video avant
                 # tout traitement coûteux.
-                source_path = f"{user_id}/youtube_{int(time.time())}"
                 process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset)
                 return {"status": "processing_started", "sourcePath": source_path}
-
-            source_path = payload["path"]
-            if not source_path.startswith(f"{user_id}/"):
-                return JSONResponse({"error": "Chemin invalide"}, status_code=403)
 
             process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset)
             return {"status": "processing_started", "sourcePath": source_path}

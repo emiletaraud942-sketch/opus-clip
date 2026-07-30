@@ -13,6 +13,26 @@ Couleurs ASS : format &H00BBGGRR (Alpha=00, puis Bleu, Vert, Rouge — inversé)
 
 from __future__ import annotations
 
+# Audit C4 (AUDIT.md #4) : un mot transcrit contenant `{`, `}` ou `\` casse le
+# format ASS — libass interprète tout `{...}` comme un bloc de commande de
+# style, et `\N`/`\n`/`\h` sont des séquences spéciales même en dehors d'un
+# bloc. Un mot avec une accolade non fermée corrompt le rendu du sous-titre
+# concerné et potentiellement des suivants. Remplace par des caractères
+# visuellement proches mais jamais interprétés par libass — préférable à un
+# simple retrait, qui ferait disparaître silencieusement du texte transcrit.
+_ASS_UNSAFE_TRANSLATION = str.maketrans({
+    "{": "｛", "}": "｝", "\\": "＼",
+})
+
+
+def _sanitize_ass_text(text: str) -> str:
+    """Neutralise les caractères qui casseraient la syntaxe ASS (accolades,
+    antislash) dans un texte destiné à un Dialogue — jamais dans un contrôle
+    de style qu'on construit nous-mêmes (ex. `{\\k40}`), uniquement sur le
+    texte transcrit."""
+    return (text or "").translate(_ASS_UNSAFE_TRANSLATION)
+
+
 # H2 — ACTIVÉ pour test manuel en prod sur Modal, à la demande de
 # l'utilisateur. Change le rendu visuel des sous-titres en style "plain"
 # (découpage linguistique français au lieu du découpage fixe par nombre de
@@ -206,10 +226,10 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
                 chunks = []
                 for w in g:
                     cs = max(1, int(round((w["end"] - w["start"]) * 100)))
-                    chunks.append(f"{{\\k{cs}}}{w['word']}")
+                    chunks.append(f"{{\\k{cs}}}{_sanitize_ass_text(w['word'])}")
                 lines.append(_dialogue(start, end, " ".join(chunks)))
             else:
-                lines.append(_dialogue(start, end, " ".join(w["word"] for w in g)))
+                lines.append(_dialogue(start, end, " ".join(_sanitize_ass_text(w["word"]) for w in g)))
     else:
         from .subtitles_fr import break_lines_fr, group_into_blocks, apply_french_typography
         # Découpe d'abord sur les pauses (mêmes règles que ci-dessus), PUIS
@@ -226,7 +246,7 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
             start = block_words[0]["start"]
             end = block_words[-1]["end"]
             text = "\\N".join(
-                apply_french_typography(" ".join(w["word"] for w in line))
+                apply_french_typography(" ".join(_sanitize_ass_text(w["word"]) for w in line))
                 for line in block
             )
             lines.append(_dialogue(start, end, text))

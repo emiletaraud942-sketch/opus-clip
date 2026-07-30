@@ -1,8 +1,15 @@
 # AUDIT.md — Audit technique autonome de SortClip
 
-Date : 2026-07-31. Auditeur : Claude (agent autonome), sans correctif appliqué.
-Scripts de reproduction : `audit/repro_*.py` (exécutés réellement, sorties
-citées ci-dessous). Aucun fichier du produit n'a été modifié pour cet audit.
+Date : 2026-07-31. Auditeur : Claude (agent autonome), sans correctif appliqué
+au moment de l'audit lui-même. Scripts de reproduction : `audit/repro_*.py`
+(exécutés réellement, sorties citées ci-dessous). Aucun fichier du produit
+n'a été modifié pendant la conduite de cet audit.
+
+> **Mise à jour post-audit** : les 4 constats BLOQUANT (#1 à #4) ont été
+> corrigés à la demande de l'utilisateur, dans un commit séparé et distinct
+> de l'audit — voir la note "CORRIGÉ" sur chacun dans le tableau § 3 et le
+> détail dans les fiches correspondantes. Le reste du rapport (CRITIQUE,
+> MAJEUR, MINEUR) reflète toujours l'état constaté, non corrigé.
 
 **Limite structurelle de cet environnement, à lire avant tout le reste** :
 cette exécution n'a accès ni à `ffmpeg`/`ffprobe`, ni à une instance Supabase
@@ -54,8 +61,8 @@ modifier/déplacer/supprimer via l'interface timeline, mais ne peut pas
 ajouter d'événement `hold_on_speaker`, ni positionner un sous-titre-cue
 libre, ni importer une image — détail au § 4.
 
-**Constats par gravité** : 4 BLOQUANT, 4 CRITIQUE, 15 MAJEUR, 2 MINEUR
-(tableau complet § 3).
+**Constats par gravité** : 4 BLOQUANT (**les 4 corrigés depuis**, voir note
+en tête de document), 4 CRITIQUE, 15 MAJEUR, 2 MINEUR (tableau complet § 3).
 
 ---
 
@@ -97,10 +104,10 @@ Facturation/cycle de vie : `billing()` (webhook Stripe, `modal_app.py:1816`),
 
 | # | Gravité | Effort | Domaine | Constat | Preuve |
 |---|---|---|---|---|---|
-| 1 | BLOQUANT | jours | E4 | Le modèle de coût ne mesure ni le calcul FFmpeg/Modal ni le stockage — la tarification n'est validée par aucune mesure complète | `modal_app.py:1673-1688`, `pricing_config.py` |
-| 2 | BLOQUANT | jours | A3/E5 | Course entre la vérification de quota (synchrone) et le débit réel (asynchrone) — dépassement de quota possible par double-soumission | `modal_app.py:1770-1783` vs `reserve_minutes` dans `process_video` |
-| 3 | BLOQUANT | heures | E5 | Bypass de facturation nominatif codé en dur, marqué "à vider" mais toujours présent | `modal_app.py:94` |
-| 4 | BLOQUANT | jours | C4 | Aucun échappement des caractères spéciaux ASS dans le texte des sous-titres — prouvé par exécution | `audit/repro_c4_ass_escaping.py`, `sortclip/captions.py:206-232`, `modal_app.py:1248` |
+| 1 | BLOQUANT — **CORRIGÉ** | jours | E4 | Le modèle de coût ne mesurait ni le calcul FFmpeg/Modal ni le stockage — la tarification n'était validée par aucune mesure complète | `pricing_config.py:compute_cost_eur/storage_cost_eur`, `supabase/schema_cost_model_fix.sql`, `modal_app.py` (télémétrie) |
+| 2 | BLOQUANT — **CORRIGÉ** | jours | A3/E5 | Course entre la vérification de quota (synchrone) et le débit réel (asynchrone) — dépassement de quota possible par double-soumission | `supabase/schema_race_fix.sql:reserve_processing_slot`, `modal_app.py:process()` |
+| 3 | BLOQUANT — **CORRIGÉ** | heures | E5 | Bypass de facturation nominatif codé en dur, marqué "à vider" mais toujours présent | `modal_app.py` (`TEST_ACCOUNT_EMAILS` lu depuis un secret, vide par défaut, journalisé) |
+| 4 | BLOQUANT — **CORRIGÉ** | jours | C4 | Aucun échappement des caractères spéciaux ASS dans le texte des sous-titres — prouvé par exécution | `sortclip/captions.py:_sanitize_ass_text`, `modal_app.py`, `tests/test_ass_escaping.py` |
 | 5 | CRITIQUE | heures | E1 | Table `stripe_events` sans RLS activée — seule table du schéma dans ce cas | `supabase/schema_phase1_minutes.sql:55`, `schema_phase2_stripe.sql:29` |
 | 6 | CRITIQUE | jours | E2 | Aucun code n'implémente la suppression de compte ni l'export de données promis par la politique de confidentialité | `politique-confidentialite.html:55` vs absence dans `modal_app.py` |
 | 7 | CRITIQUE | semaines | F3 | Le recadrage est TOUJOURS centré — aucun champ de position dans l'EDL ni le compilateur ; personne (ni l'IA ni l'utilisateur) ne peut recentrer sur un sujet décalé | `sortclip/edl.py` (`FramingEvent`), `sortclip/compile.py:_crop_scale` |
@@ -142,6 +149,16 @@ trancher sans télémétrie complète.
 Effet client : la grille tarifaire (`tarifs.html`) pourrait être déficitaire
 sur les gros utilisateurs sans qu'aucun mécanisme actuel ne puisse le
 détecter.
+**Corrigé** : `pricing_config.compute_cost_eur()` (temps réel de montage ×
+hypothèse vCPU × tarif Modal) et `storage_cost_eur()` (taille réelle
+uploadée × rétention du plan × tarif Supabase) ajoutés — les deux marqués
+`{{À_COMPLÉTER}}` explicitement (tarifs publics, non calibrés contre une
+vraie facture). `processing_costs` gagne les colonnes `cost_compute_eur`/
+`cost_storage_eur` (`supabase/schema_cost_model_fix.sql`) ; `cost_total_eur`
+inclut désormais les quatre composantes. `render_wall_seconds` et
+`total_output_bytes` mesurés réellement dans `process_video`. Reste NON
+VÉRIFIÉ : la calibration des deux nouveaux tarifs contre une facture
+Modal/Supabase réelle — seule une exécution en production peut la fournir.
 
 **#2 — Course quota (BLOQUANT, A3/E5)**
 Observé : `process()` (`modal_app.py:1770-1783`) vérifie
@@ -156,6 +173,18 @@ vérification. Aucune clé d'idempotence sur `source_path`
 `supabase/schema_phase1_minutes.sql`).
 Effet client : dépassement de quota exploitable trivialement, sans même
 intention malveillante (un double-clic sur "Générer" suffit).
+**Corrigé** : `reserve_processing_slot()` (fonction Postgres,
+`supabase/schema_race_fix.sql`) vérifie la concurrence ET une estimation du
+quota, PUIS insère la ligne `clip_jobs`, dans UNE transaction sérialisée par
+utilisateur (`pg_advisory_xact_lock`) — plus de fenêtre entre "vérifier" et
+"enregistrer". `process()` appelle cette fonction avant tout spawn ;
+`process_video` n'insère plus sa propre ligne `clip_jobs` (déjà fait par la
+fonction). Reste un résidu non fermé, documenté dans la migration : pour un
+lien YouTube, la durée réelle n'est connue qu'après téléchargement, donc la
+vérification de quota au moment de la réservation reste une estimation (0
+minute demandée) — non fermable sans télécharger la vidéo avant de répondre
+à la requête HTTP. `count_active_jobs()` (l'ancienne vérification séparée)
+supprimée.
 
 **#3 — Bypass de facturation nominatif (BLOQUANT, E5)**
 Observé : `TEST_ACCOUNT_EMAILS = {"emiletaraud942@gmail.com"}`
@@ -165,6 +194,11 @@ tests terminés" — ce qui n'a pas été fait. Sans gravité de sécurité (c'e
 le compte du fondateur), mais c'est un point de friction opérationnel réel :
 si ce mécanisme est réutilisé/étendu sans discipline, ou si l'email change
 de main, la facturation d'un compte peut être silencieusement désactivée.
+**Corrigé** : `TEST_ACCOUNT_EMAILS` lit désormais un secret Modal
+(`SORTCLIP_TEST_ACCOUNT_EMAILS`, emails séparés par des virgules), **vide
+par défaut** — plus aucun bypass n'existe tant que quelqu'un ne l'active pas
+explicitement au niveau infrastructure. Chaque déclenchement du bypass est
+journalisé (`print(...flush=True)`), pour rester auditable si jamais réactivé.
 
 **#4 — Injection ASS (BLOQUANT, C4)**
 Observé et **exécuté** (`audit/repro_c4_ass_escaping.py`). Sortie exacte :
@@ -183,6 +217,13 @@ rare — hashtags, notations mathématiques, code lu à voix haute).
 NON VÉRIFIÉ : le comportement RÉEL de libass face à ces séquences (pas de
 libass/ffmpeg dans cet environnement) — mais l'absence de tout échappement
 en amont est un fait de code, pas une supposition.
+**Corrigé** : `_sanitize_ass_text()` (`sortclip/captions.py`, dupliquée
+localement dans `modal_app.py` pour le chemin de rendu de repli) remplace
+`{`/`}`/`\` par des caractères visuellement proches mais jamais interprétés
+par libass (`｛`/`｝`/`＼`) avant toute insertion dans un `Dialogue`. Ré-exécuté
+le même script de reproduction après correctif : les trois séquences
+dangereuses n'apparaissent plus telles quelles, les accents survivent
+toujours. 4 nouveaux tests (`tests/test_ass_escaping.py`).
 
 ---
 
