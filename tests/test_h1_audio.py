@@ -17,6 +17,7 @@ except ImportError:
     print("SKIP : pydantic non installé (dispo via fastapi sur Modal).")
     sys.exit(0)
 
+import sortclip.compile as compile_mod
 from sortclip.edl import EDL, Source, Canvas, Captions, Background
 from sortclip.compile import build_filter_complex, build_command, measure_loudness, _audio_keeps_filter
 
@@ -37,28 +38,52 @@ def test_filter_complex_ends_with_out_unchanged_contract():
     assert fc.endswith("[out]")
 
 
-def test_filter_complex_contains_audio_chain():
+def test_audio_chain_disabled_by_default():
+    # Le merge a activé ENABLE_AUDIO_CHAIN_H1 = False (non validé sur média
+    # réel) : [ca] doit être recopié tel quel vers [caf], sans traitement.
+    assert compile_mod.ENABLE_AUDIO_CHAIN_H1 is False
     fc = build_filter_complex(_edl())
-    assert "[ca]" in fc
-    assert "highpass=f=80" in fc
-    assert "acompressor=" in fc
-    assert "loudnorm=" in fc
     assert "[caf]" in fc
+    assert "highpass=f=80" not in fc
+    assert "loudnorm=" not in fc
+
+
+def test_filter_complex_contains_audio_chain_when_enabled():
+    # Le code H1 reste fonctionnel — activable en forçant le flag (le
+    # rapport du chantier explique pourquoi il est désactivé par défaut).
+    compile_mod.ENABLE_AUDIO_CHAIN_H1 = True
+    try:
+        fc = build_filter_complex(_edl())
+        assert "[ca]" in fc
+        assert "highpass=f=80" in fc
+        assert "acompressor=" in fc
+        assert "loudnorm=" in fc
+        assert "[caf]" in fc
+    finally:
+        compile_mod.ENABLE_AUDIO_CHAIN_H1 = False
 
 
 def test_filter_complex_single_pass_fallback_without_measurement():
-    fc = build_filter_complex(_edl(), loudness_measurement=None)
-    assert "measured_I" not in fc   # repli une passe : pas de paramètres mesurés
+    compile_mod.ENABLE_AUDIO_CHAIN_H1 = True
+    try:
+        fc = build_filter_complex(_edl(), loudness_measurement=None)
+        assert "measured_I" not in fc   # repli une passe : pas de paramètres mesurés
+    finally:
+        compile_mod.ENABLE_AUDIO_CHAIN_H1 = False
 
 
 def test_filter_complex_two_pass_with_measurement():
-    measurement = {
-        "measured_I": -20.1, "measured_TP": -3.2,
-        "measured_LRA": 8.4, "measured_thresh": -30.5, "target_offset": 0.7,
-    }
-    fc = build_filter_complex(_edl(), loudness_measurement=measurement)
-    assert "measured_I=-20.1" in fc
-    assert "linear=true" in fc
+    compile_mod.ENABLE_AUDIO_CHAIN_H1 = True
+    try:
+        measurement = {
+            "measured_I": -20.1, "measured_TP": -3.2,
+            "measured_LRA": 8.4, "measured_thresh": -30.5, "target_offset": 0.7,
+        }
+        fc = build_filter_complex(_edl(), loudness_measurement=measurement)
+        assert "measured_I=-20.1" in fc
+        assert "linear=true" in fc
+    finally:
+        compile_mod.ENABLE_AUDIO_CHAIN_H1 = False
 
 
 def test_build_command_maps_processed_audio_not_raw():

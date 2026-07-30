@@ -13,6 +13,11 @@ Couleurs ASS : format &H00BBGGRR (Alpha=00, puis Bleu, Vert, Rouge — inversé)
 
 from __future__ import annotations
 
+# H2 — DÉSACTIVÉ pour ce merge : change le rendu visuel des sous-titres en
+# style "plain" pour tous les clips existants ; à valider visuellement en
+# prod avant activation (repasser à True). Le code reste en place et testé.
+ENABLE_FR_LINE_BREAKING = False
+
 
 def _hex_to_ass(color: str) -> str:
     """#RRGGBB -> &H00BBGGRR (composantes inversées, alpha opaque)."""
@@ -109,13 +114,14 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
       déterminant et nom, jamais après une forme élidée, "ne...pas" toujours
       ensemble, jamais un mot d'1-2 lettres isolé en fin de ligne), deux
       lignes par bloc maximum, typographie française (espaces insécables).
+      DÉSACTIVÉ pour l'instant (ENABLE_FR_LINE_BREAKING = False) : repli sur
+      l'ancien découpage fixe par `words_per_line`, identique à avant ce chantier.
     """
     from pathlib import Path
-    from .subtitles_fr import break_lines_fr, group_into_blocks, apply_french_typography
 
     lines = [_ass_header(captions, canvas)]
 
-    if captions.style == "karaoke":
+    if captions.style == "karaoke" or not ENABLE_FR_LINE_BREAKING:
         wpl = captions.words_per_line
         groups = [words_out[i:i + wpl] for i in range(0, len(words_out), wpl)]
         for g in groups:
@@ -123,12 +129,16 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
                 continue
             start = g[0]["start"]
             end = g[-1]["end"]
-            chunks = []
-            for w in g:
-                cs = max(1, int(round((w["end"] - w["start"]) * 100)))
-                chunks.append(f"{{\\k{cs}}}{w['word']}")
-            lines.append(_dialogue(start, end, " ".join(chunks)))
+            if captions.style == "karaoke":
+                chunks = []
+                for w in g:
+                    cs = max(1, int(round((w["end"] - w["start"]) * 100)))
+                    chunks.append(f"{{\\k{cs}}}{w['word']}")
+                lines.append(_dialogue(start, end, " ".join(chunks)))
+            else:
+                lines.append(_dialogue(start, end, " ".join(w["word"] for w in g)))
     else:
+        from .subtitles_fr import break_lines_fr, group_into_blocks, apply_french_typography
         fr_lines = break_lines_fr(words_out, max_chars=22)
         blocks = group_into_blocks(fr_lines, max_lines=2)
         for block in blocks:

@@ -20,6 +20,12 @@ from pathlib import Path
 
 from .edl import EDL, FRAMING_ZOOM
 
+# H1 — DÉSACTIVÉ pour ce merge : non testé sur média réel (pas de ffmpeg
+# disponible pendant le développement), seuils non validés à l'oreille sur
+# de vraies voix. Le code reste en place, prêt à être activé une fois validé
+# manuellement en prod (repasser à True) — voir rapport du chantier refonte-ia.
+ENABLE_AUDIO_CHAIN_H1 = False
+
 # H1 — chaîne audio. Coût nul (aucun GPU, du FFmpeg pur), effet perçu fort : le
 # format court se consomme au volume maximum, dans le bruit. Cible EBU R128.
 # {{À_COMPLÉTER: valider à l'oreille sur TikTok/Reels/Shorts — le format court
@@ -133,31 +139,37 @@ def build_filter_complex(edl: EDL, ass_path: str | None = None,
         parts.append(f"{chain}concat=n={n}:v=1:a=1[cv][ca]")
 
     # --- 1bis. H1 : chaîne audio (isolée de la vidéo, coût FFmpeg pur) -------
-    # Passe-haut (retire les grondements de table/clim) -> légère compression
-    # (resserre l'écart proche/loin du micro) -> encoche sifflantes -> loudness
-    # EBU R128. Deux passes si `loudness_measurement` est fourni (mesuré par
-    # measure_loudness), sinon repli une passe (moins précis, jamais bloquant).
-    # Placé juste après [ca] (ne dépend que de lui) pour que le graphe se
-    # termine toujours par l'étape vidéo [out] — contrat inchangé pour les
-    # appelants qui inspectent la fin de la chaîne.
-    audio_chain = [
-        "highpass=f=80",
-        "acompressor=threshold=-18dB:ratio=3:attack=5:release=50",
-        f"equalizer=f={_DEESS_FREQ_HZ}:width_type=o:width=2:g={_DEESS_GAIN_DB}",
-    ]
-    if loudness_measurement:
-        m = loudness_measurement
-        audio_chain.append(
-            f"loudnorm=I={LOUDNORM_TARGET_I}:TP={LOUDNORM_TARGET_TP}:LRA={LOUDNORM_TARGET_LRA}:"
-            f"measured_I={m['measured_I']}:measured_TP={m['measured_TP']}:"
-            f"measured_LRA={m['measured_LRA']}:measured_thresh={m['measured_thresh']}:"
-            f"offset={m['target_offset']}:linear=true:print_format=summary"
-        )
+    # DÉSACTIVÉ (ENABLE_AUDIO_CHAIN_H1 = False) : non validé sur média réel.
+    # Quand désactivé, [ca] est simplement recopié vers [caf] (identité) pour
+    # que build_command puisse toujours mapper "[caf]" sans condition.
+    if ENABLE_AUDIO_CHAIN_H1:
+        # Passe-haut (retire les grondements de table/clim) -> légère
+        # compression (resserre l'écart proche/loin du micro) -> encoche
+        # sifflantes -> loudness EBU R128. Deux passes si `loudness_measurement`
+        # est fourni (mesuré par measure_loudness), sinon repli une passe.
+        # Placé juste après [ca] (ne dépend que de lui) pour que le graphe se
+        # termine toujours par l'étape vidéo [out] — contrat inchangé pour les
+        # appelants qui inspectent la fin de la chaîne.
+        audio_chain = [
+            "highpass=f=80",
+            "acompressor=threshold=-18dB:ratio=3:attack=5:release=50",
+            f"equalizer=f={_DEESS_FREQ_HZ}:width_type=o:width=2:g={_DEESS_GAIN_DB}",
+        ]
+        if loudness_measurement:
+            m = loudness_measurement
+            audio_chain.append(
+                f"loudnorm=I={LOUDNORM_TARGET_I}:TP={LOUDNORM_TARGET_TP}:LRA={LOUDNORM_TARGET_LRA}:"
+                f"measured_I={m['measured_I']}:measured_TP={m['measured_TP']}:"
+                f"measured_LRA={m['measured_LRA']}:measured_thresh={m['measured_thresh']}:"
+                f"offset={m['target_offset']}:linear=true:print_format=summary"
+            )
+        else:
+            audio_chain.append(
+                f"loudnorm=I={LOUDNORM_TARGET_I}:TP={LOUDNORM_TARGET_TP}:LRA={LOUDNORM_TARGET_LRA}"
+            )
+        parts.append("[ca]" + ",".join(audio_chain) + "[caf]")
     else:
-        audio_chain.append(
-            f"loudnorm=I={LOUDNORM_TARGET_I}:TP={LOUDNORM_TARGET_TP}:LRA={LOUDNORM_TARGET_LRA}"
-        )
-    parts.append("[ca]" + ",".join(audio_chain) + "[caf]")
+        parts.append("[ca]anull[caf]")
 
     # --- 2. Séparation fond / premier plan -----------------------------------
     needs_bg = edl.background.mode in ("blur", "solid")
@@ -294,10 +306,10 @@ def build_command(
 
 def render(edl: EDL, out_path: str, **kw) -> subprocess.CompletedProcess:
     # H1 : mesure du volume AVANT rendu (passe 1), pour un loudnorm à deux
-    # passes plus précis. Best-effort : si la mesure échoue (ffmpeg absent,
-    # source illisible…), le rendu se fait quand même, avec un loudnorm à une
-    # passe (repli géré dans build_filter_complex).
-    if "loudness_measurement" not in kw:
+    # passes plus précis. DÉSACTIVÉ tant que ENABLE_AUDIO_CHAIN_H1 est False
+    # (la mesure ne servirait à rien : build_filter_complex ignore la chaîne
+    # audio dans ce cas) — évite une passe ffmpeg supplémentaire pour rien.
+    if ENABLE_AUDIO_CHAIN_H1 and "loudness_measurement" not in kw:
         kw = {**kw, "loudness_measurement": measure_loudness(edl)}
     cmd = build_command(edl, out_path, **kw)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
