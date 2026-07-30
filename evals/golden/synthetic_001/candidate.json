@@ -1,0 +1,5 @@
+{"out_duration": 10.0,
+ "framing_spans": [[0.0, 6.0, "wide"], [6.0, 10.0, "tight"]],
+ "emphasis_word_indices": [3, 8],
+ "n_events": 5, "n_emitted": 6, "n_rejected": 1,
+ "instruction_ok": true}
