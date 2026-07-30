@@ -119,6 +119,10 @@ class Canvas(BaseModel):
     w: int = 1080
     h: int = 1920
     fps: int = 30
+    # F4 : plateforme visée, pour appliquer ses zones de sécurité d'interface
+    # (voir sortclip.safe_zones). "default" = aucune zone interdite connue —
+    # comportement inchangé pour tout EDL existant (champ additif, rétro-compatible).
+    platform: Literal["default", "tiktok", "reels", "shorts"] = "default"
 
 
 class Source(BaseModel):

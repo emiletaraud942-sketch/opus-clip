@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .edl import EDL
+from .safe_zones import caption_y_is_safe, clamp_caption_y
 
 # Deux cadrages plus rapprochés que ça produisent un clignotement : on écarte
 # le second.
@@ -34,6 +35,18 @@ def validate(edl: EDL, word_count: int) -> tuple[EDL, list[Issue]]:
     dur = edl.out_duration
     kept = []
     last_framing_t: float | None = None
+
+    # F4 : zones de sécurité par plateforme. Remonte (jamais ne baisse) la
+    # position des sous-titres si elle tombe dans la zone d'interface
+    # interdite de la plateforme visée (canvas.platform) — corrige plutôt que
+    # de rejeter, comme le reste du validateur.
+    platform = getattr(edl.canvas, "platform", "default")
+    if edl.captions.enabled and not caption_y_is_safe(edl.captions.y, platform):
+        safe_y = clamp_caption_y(edl.captions.y, platform)
+        issues.append(Issue("corrected",
+            f"sous-titres remontés de y={edl.captions.y:.2f} à y={safe_y:.2f} "
+            f"(zone d'interface « {platform} »)"))
+        edl = edl.model_copy(update={"captions": edl.captions.model_copy(update={"y": safe_y})})
 
     for e in sorted(edl.events, key=lambda x: x.t):
         # 1. Hors de la durée de sortie.
