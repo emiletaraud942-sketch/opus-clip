@@ -45,6 +45,7 @@ from .subs_metrics import (
     offset_median_and_stddev,
     offset_trend,
 )
+from .worksheet import write_worksheet_csv, ingest_worksheet
 
 
 def _evaluate_clip(clip: GoldenClip) -> dict:
@@ -203,6 +204,29 @@ def cmd_subs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_worksheet_make(args: argparse.Namespace) -> int:
+    words = json.loads(Path(args.transcript).read_text()).get("words", [])
+    if not words:
+        print(f"[eval worksheet] aucun mot trouvé dans {args.transcript} "
+              "(attendu : {\"words\": [{\"word\":..,\"start\":..,\"end\":..}, ...]}).")
+        return 1
+    out = write_worksheet_csv(words, args.out, n=args.n)
+    print(f"[eval worksheet] {min(args.n, len(words))} mots répartis dans le clip -> {out}")
+    print("[eval worksheet] écoute le clip, remplis correct_oui_non (oui/non) pour chaque "
+          "ligne, et mot_correct/debut_correct_s seulement si \"non\". Puis :")
+    print(f"  python -m sortclip.eval worksheet ingest --transcript {args.transcript} "
+          f"--csv {out} --clip-id <id> --category <categorie>")
+    return 0
+
+
+def cmd_worksheet_ingest(args: argparse.Namespace) -> int:
+    words = json.loads(Path(args.transcript).read_text()).get("words", [])
+    clip_dir = ingest_worksheet(words, args.csv, args.clip_id, args.category, out_root=args.out)
+    print(f"[eval worksheet] clip écrit dans {clip_dir}")
+    print(f"  python -m sortclip.eval subs --report   # pour l'inclure dans le diagnostic")
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     baseline = json.loads(Path(args.baseline).read_text())
     candidate = json.loads(Path(args.candidate).read_text())
@@ -306,6 +330,24 @@ def main(argv: list[str] | None = None) -> int:
     p_subs = sub.add_parser("subs", help="Évalue le jeu de test de sous-titrage (evals/subs/).")
     p_subs.add_argument("--report", action="store_true")
     p_subs.set_defaults(func=cmd_subs)
+
+    p_ws = sub.add_parser("worksheet", help="Génère/ingère une feuille d'annotation à faible friction.")
+    ws_sub = p_ws.add_subparsers(dest="worksheet_command", required=True)
+
+    p_ws_make = ws_sub.add_parser("make", help="Génère un tableau à remplir depuis une transcription existante.")
+    p_ws_make.add_argument("--transcript", required=True, help='JSON {"words": [...]}')
+    p_ws_make.add_argument("--out", required=True, help="Chemin du CSV à écrire.")
+    p_ws_make.add_argument("--n", type=int, default=20)
+    p_ws_make.set_defaults(func=cmd_worksheet_make)
+
+    p_ws_ingest = ws_sub.add_parser("ingest", help="Transforme un tableau rempli en clip evals/subs/.")
+    p_ws_ingest.add_argument("--transcript", required=True, help='JSON {"words": [...]} original complet')
+    p_ws_ingest.add_argument("--csv", required=True, help="Tableau rempli par l'utilisateur.")
+    p_ws_ingest.add_argument("--clip-id", required=True)
+    p_ws_ingest.add_argument("--category", required=True,
+                             help="propre|musique_continue|intro_musicale|chevauchement|accent_debit|silences_longs")
+    p_ws_ingest.add_argument("--out", default="evals/subs")
+    p_ws_ingest.set_defaults(func=cmd_worksheet_ingest)
 
     p_cmp = sub.add_parser("compare", help="Compare deux rapports JSON.")
     p_cmp.add_argument("--baseline", required=True, help="Chemin du rapport JSON de référence.")
