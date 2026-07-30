@@ -26,11 +26,13 @@ from .compile import build_filter_complex, build_command, render, as_shell, fore
 from .validate import validate, Issue
 from .store import EDLStore
 from .patch import PatchOp, PatchResult, apply_patch, apply_text_adjustment
+from .semantic import extend_to_sentence_boundaries, looks_like_sentence_start, looks_like_sentence_end
 from . import director
 
 __all__ = [
     "validate", "Issue", "EDLStore",
     "PatchOp", "PatchResult", "apply_patch", "apply_text_adjustment", "director",
+    "extend_to_sentence_boundaries", "looks_like_sentence_start", "looks_like_sentence_end",
     "EDL", "Interval", "Canvas", "Source", "Background", "Captions", "Watermark",
     "FramingEvent", "EmphasisEvent", "HoldOnSpeakerEvent", "SpeedEvent",
     "Framing", "Transition", "FRAMING_ZOOM", "new_id",

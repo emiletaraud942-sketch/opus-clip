@@ -32,6 +32,7 @@ Secrets optionnels (contournement anti-robot YouTube) :
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -704,10 +705,20 @@ def _final_score(scores: dict) -> int:
 def _snap_indices_to_words(start_i: int, end_i: int, words: list) -> tuple[float, float] | None:
     """Convertit une découpe en index de mots vers des horodatages, en
     validant les bornes et la durée (protection anti-hallucination : le modèle
-    ne produit jamais de secondes, seulement des index)."""
+    ne produit jamais de secondes, seulement des index). Applique d'abord le
+    contrôle d'intégrité sémantique G1 (sortclip.semantic) : étend vers la
+    frontière de phrase la plus proche plutôt que de rejeter un clip qui
+    commence/finit au milieu d'une pensée."""
+    from sortclip import extend_to_sentence_boundaries
+
     n = len(words)
     if not (0 <= start_i < end_i < n):
         return None
+
+    start_i, end_i = extend_to_sentence_boundaries(start_i, end_i, words)
+    if not (0 <= start_i < end_i < n):
+        return None
+
     real_start = words[start_i]["start"]
     real_end = words[end_i]["end"]
     if real_end - real_start > MAX_CLIP_SECONDS:
