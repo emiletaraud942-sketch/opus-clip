@@ -202,7 +202,16 @@ def direct(client, words_out: list[dict], *, hint: str = "",
         indexed = annotated_transcript or " ".join(
             f"({i}){w['word']}" for i, w in enumerate(words_out)
         )
-        system = DIRECTOR_SYSTEM + (("\n\n" + hint) if hint else "")
+        # D1 : DIRECTOR_SYSTEM est stable d'un clip à l'autre (même prompt pour
+        # tous les utilisateurs) -> point de coupure de cache ICI, TTL 1h (ce
+        # chemin tourne en continu sur la plateforme). `hint` est variable
+        # (dépend de l'utilisateur/consigne) -> bloc SÉPARÉ, non caché, à la
+        # suite. Ne jamais mettre cache_control sur un bloc qui varie : ça
+        # invaliderait le cache à chaque appel au lieu de le faire gagner.
+        system = [{"type": "text", "text": DIRECTOR_SYSTEM,
+                   "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
+        if hint:
+            system.append({"type": "text", "text": hint})
         resp = client.messages.create(
             model=model, max_tokens=1500, temperature=0,
             system=system, tools=[build_place_events_tool()],
@@ -229,9 +238,15 @@ def adjust_with_text(client, edl, instruction: str, *, model: str = DIRECTOR_MOD
             if e.op == "framing":
                 item["value"] = e.value
             summary.append(item)
+        # D1 : ADJUST_SYSTEM est stable mais ce chemin (retouche libre) est
+        # moins fréquent que le réalisateur -> TTL court (5 min, valeur par
+        # défaut d'Anthropic mais rendue explicite pour la lisibilité et pour
+        # documenter le choix, cf. rapport final).
+        system = [{"type": "text", "text": ADJUST_SYSTEM,
+                   "cache_control": {"type": "ephemeral", "ttl": "5m"}}]
         resp = client.messages.create(
             model=model, max_tokens=1000, temperature=0,
-            system=ADJUST_SYSTEM, tools=[build_edit_tool()],
+            system=system, tools=[build_edit_tool()],
             tool_choice={"type": "tool", "name": "edit_events"},
             messages=[{"role": "user", "content":
                        f"Événements actuels : {json.dumps(summary, ensure_ascii=False)}\n\n"

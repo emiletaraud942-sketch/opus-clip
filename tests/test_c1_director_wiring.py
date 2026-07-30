@@ -62,8 +62,11 @@ def main():
     print("  2. avec annotation : transcript annoté envoyé au LLM"); ok += 1
 
     # 3. Le prompt système explique les marqueurs (sinon le LLM les ignore).
+    # D1 : `system` est désormais une liste de blocs (cache_control) et non
+    # une simple chaîne -> on concatène le texte de tous les blocs.
     system2 = client2.messages.last_call["system"]
-    assert "énergie" in system2 and "débit" in system2
+    system2_text = " ".join(b["text"] for b in system2)
+    assert "énergie" in system2_text and "débit" in system2_text
     print("  3. prompt système explique les marqueurs de prosodie"); ok += 1
 
     print(f"\n{ok} étapes validées.")

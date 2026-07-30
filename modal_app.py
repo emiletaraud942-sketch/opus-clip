@@ -777,7 +777,13 @@ SIGNAL_BONUS_MAX = 15
 
 
 def _record_usage(usage_sink, model, response):
-    """Ajoute les tokens facturés d'un appel au journal de coût (si fourni)."""
+    """Ajoute les tokens facturés d'un appel au journal de coût (si fourni).
+
+    D1 : journalise aussi cache_creation_input_tokens et
+    cache_read_input_tokens (présents dans `usage` dès qu'un bloc porte
+    cache_control) — sert à vérifier RÉELLEMENT le taux de succès du cache de
+    prompt, pas à le supposer. Un `input` élevé mais surtout composé de
+    `cache_read` signifie que le cache fonctionne (lecture à 0,1x le prix)."""
     if usage_sink is None:
         return
     try:
@@ -785,6 +791,8 @@ def _record_usage(usage_sink, model, response):
             "model": model,
             "input": getattr(response.usage, "input_tokens", 0) or 0,
             "output": getattr(response.usage, "output_tokens", 0) or 0,
+            "cache_creation": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+            "cache_read": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
         })
     except Exception:
         pass
@@ -830,7 +838,11 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme exac
         system=[{
             "type": "text",
             "text": CLIP_SCORING_SYSTEM,
-            "cache_control": {"type": "ephemeral"},
+            # D1 : TTL explicite (1h) — ce prompt système est identique pour
+            # toutes les vidéos de tous les utilisateurs, appelé en continu ;
+            # le TTL court par défaut (5 min) expirerait entre deux vidéos
+            # traitées à quelques minutes d'écart, perdant le bénéfice du cache.
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
         }],
         messages=[{"role": "user", "content": user_message}],
     )
@@ -967,7 +979,9 @@ def generate_tiktok_copy(clip_transcript: str, usage_sink: list | None = None) -
             system=[{
                 "type": "text",
                 "text": TIKTOK_COPY_SYSTEM,
-                "cache_control": {"type": "ephemeral"},
+                # D1 : même raisonnement que CLIP_SCORING_SYSTEM ci-dessus —
+                # prompt stable, appelé en continu -> TTL 1h explicite.
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
             }],
             messages=[{"role": "user", "content": (
                 f"CLIP : {clip_transcript}\n\n"
