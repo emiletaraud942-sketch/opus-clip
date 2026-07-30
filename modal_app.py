@@ -1563,9 +1563,18 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             # (sélection, sous-titrage). Journalise ce qui est retiré (C3 :
             # "journalisant chaque suppression") pour pouvoir vérifier plus
             # tard qu'aucun contenu légitime n'est écarté.
-            from sortclip import clean_hallucinations
-            words, _halluc_counts = clean_hallucinations(words)
-            if _halluc_counts["removed_total"]:
+            #
+            # Garde-fou (bug réel observé en prod : le filtre a un jour retiré
+            # trop de mots d'une vidéo légitime, laissant moins de
+            # MIN_CLIP_SECONDS de parole continue -> plus aucun clip
+            # exploitable, échec total du traitement). safe_clean_hallucinations
+            # annule le nettoyage plutôt que de risquer de vider la vidéo.
+            from sortclip import safe_clean_hallucinations
+            words, _halluc_counts = safe_clean_hallucinations(words)
+            if _halluc_counts.get("reverted"):
+                print(f"[process_video] filtre anti-hallucination trop agressif "
+                      f"({_halluc_counts}) — annulé, transcription d'origine conservée.")
+            elif _halluc_counts["removed_total"]:
                 print(f"[process_video] hallucinations/boucles filtrées : {_halluc_counts}")
                 full_text = " ".join(w["word"] for w in words)
 

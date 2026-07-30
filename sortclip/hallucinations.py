@@ -140,3 +140,32 @@ def clean_hallucinations(words: list[dict], *,
         "removed_loop_repeats": n_repeats,
         "removed_total": n_phrases + n_duration + n_repeats,
     }
+
+
+# Bug réel observé en prod : sur une vidéo légitime, clean_hallucinations() a
+# retiré trop de mots d'un coup, laissant trop peu de parole continue pour
+# qu'un seul clip soit exploitable -> échec total du traitement ("Aucun
+# moment exploitable n'a été trouvé"). Un filtre trop agressif est TOUJOURS
+# pire que quelques hallucinations qui passent : ce seuil annule le nettoyage
+# plutôt que de risquer de vider la vidéo. {{À_COMPLÉTER : 0.5 pas validé sur
+# un vrai corpus, choisi par prudence (perdre la moitié du transcript est déjà
+# un signal fort que quelque chose s'est mal passé).}}
+MIN_KEEP_RATIO = 0.5
+
+
+def safe_clean_hallucinations(words: list[dict], *,
+                              min_keep_ratio: float = MIN_KEEP_RATIO,
+                              **kwargs) -> tuple[list[dict], dict]:
+    """Comme clean_hallucinations(), mais annule le nettoyage (revient aux
+    mots d'origine) si plus de `1 - min_keep_ratio` des mots ont été retirés
+    — protège contre un filtre trop agressif sur une vidéo légitime. Le
+    décompte renvoyé inclut toujours `reverted` (bool)."""
+    if not words:
+        return words, {"removed_phrases": 0, "removed_duration_anomaly": 0,
+                       "removed_loop_repeats": 0, "removed_total": 0, "reverted": False}
+    cleaned, counts = clean_hallucinations(words, **kwargs)
+    if counts["removed_total"] and len(cleaned) < len(words) * min_keep_ratio:
+        counts["reverted"] = True
+        return list(words), counts
+    counts["reverted"] = False
+    return cleaned, counts

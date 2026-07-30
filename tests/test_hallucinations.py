@@ -11,6 +11,7 @@ from sortclip.hallucinations import (
     filter_anomalous_word_duration,
     filter_consecutive_repeats,
     clean_hallucinations,
+    safe_clean_hallucinations,
 )
 
 
@@ -89,6 +90,30 @@ def test_clean_hallucinations_never_raises_on_empty_input():
     filtered, counts = clean_hallucinations([])
     assert filtered == []
     assert counts["removed_total"] == 0
+
+
+# --- Garde-fou (bug réel : filtre trop agressif -> vidéo vidée) ------------
+
+def test_safe_clean_hallucinations_reverts_when_too_aggressive():
+    # "boucle" x20 tronquée à 3 -> retire 17 mots sur 21, largement > 50% :
+    # DOIT annuler et renvoyer les mots d'origine intacts.
+    words = _words(["boucle"] * 20 + ["bonjour", "vrai"])
+    filtered, counts = safe_clean_hallucinations(words, phrases=[], max_repeats=3)
+    assert counts["reverted"] is True
+    assert filtered == words   # transcription d'origine, intacte
+
+
+def test_safe_clean_hallucinations_keeps_cleanup_when_reasonable():
+    words = _words(["bonjour"] + ["euh"] * 5 + ["merci", "beaucoup", "tout", "le", "monde"])
+    filtered, counts = safe_clean_hallucinations(words, phrases=[], max_repeats=2)
+    assert counts["reverted"] is False
+    assert len(filtered) < len(words)   # le nettoyage a bien été appliqué
+
+
+def test_safe_clean_hallucinations_never_raises_on_empty_input():
+    filtered, counts = safe_clean_hallucinations([])
+    assert filtered == []
+    assert counts["reverted"] is False
 
 
 if __name__ == "__main__":
