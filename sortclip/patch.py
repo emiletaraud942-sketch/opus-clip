@@ -295,14 +295,24 @@ def apply_text_adjustment(edl: EDL, instruction: str,
             edl2 = edl2.model_copy(update={"events": [*edl2.events, tight]})
             notes.append("cadrage resserré ajouté (gros plan)")
 
-    # --- Plan large sur tout le clip (A1) ---
+    # --- Plan large sur tout le clip (A1/A2) ---
     if "plan large" in s or "dézoome" in s or "dezoome" in s or "recule" in s:
-        new_events = [
-            e.model_copy(update={"value": "wide"}) if e.op == "framing" else e
-            for e in edl2.events
-        ]
-        edl2 = edl2.model_copy(update={"events": new_events})
-        notes.append("cadrage élargi sur tout le clip")
+        # A2 (prompt amélioration commandes) : sans transformation à faire
+        # (aucun événement de cadrage, ou déjà tous en "wide" — le défaut
+        # SANS aucun événement est déjà "wide", cf. framing_spans()), le code
+        # posait quand même la note "cadrage élargi" alors que rien ne
+        # changeait réellement. Même classe de faux-succès que B1.
+        framings = [e for e in edl2.events if e.op == "framing"]
+        already_wide = all(f.value == "wide" for f in framings)
+        if not framings or already_wide:
+            notes.append("déjà en plan large sur tout le clip")
+        else:
+            new_events = [
+                e.model_copy(update={"value": "wide"}) if e.op == "framing" else e
+                for e in edl2.events
+            ]
+            edl2 = edl2.model_copy(update={"events": new_events})
+            notes.append("cadrage élargi sur tout le clip")
 
     # --- Taille des sous-titres ---
     if "sous-titre" in s or "sous titre" in s or "texte" in s:
