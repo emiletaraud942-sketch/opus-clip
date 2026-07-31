@@ -504,6 +504,31 @@ def apply_text_adjustment(edl: EDL, instruction: str,
         edl2 = edl2.model_copy(update={"background": edl2.background.model_copy(update={"mode": "none"})})
         notes.append("plein cadre (sans fond, bandes noires)")
 
+    # --- Recomposition des lignes de sous-titres (B3, prompt amélioration
+    # commandes) : nombre de mots par ligne, jusqu'ici IMPOSSIBLE à changer
+    # après génération (Captions.words_per_line existait mais aucune
+    # consigne ne le touchait). ±1 mot/ligne par appel, avec le même
+    # traitement honnête qu'en B1 quand la limite (1 ou 10) est déjà atteinte.
+    if "sous-titre" in s or "sous titre" in s:
+        if "plus compact" in s or "moins de mots par ligne" in s or "lignes plus courtes" in s:
+            old_wpl = edl2.captions.words_per_line
+            new_wpl = max(1, old_wpl - 1)
+            if new_wpl == old_wpl:
+                notes.append(f"sous-titres déjà au minimum ({old_wpl} mot/ligne)")
+            else:
+                edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(
+                    update={"words_per_line": new_wpl})})
+                notes.append(f"lignes de sous-titres plus courtes ({new_wpl} mots/ligne)")
+        elif "plus aéré" in s or "plus aere" in s or "plus de mots par ligne" in s or "lignes plus longues" in s:
+            old_wpl = edl2.captions.words_per_line
+            new_wpl = min(10, old_wpl + 1)
+            if new_wpl == old_wpl:
+                notes.append(f"sous-titres déjà au maximum ({old_wpl} mots/ligne)")
+            else:
+                edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(
+                    update={"words_per_line": new_wpl})})
+                notes.append(f"lignes de sous-titres plus aérées ({new_wpl} mots/ligne)")
+
     # --- Sous-titres : activer/désactiver complètement (F4) ---
     if "retire les sous-titres" in s or "enlève les sous-titres" in s or "sans sous-titres" in s or "désactive les sous-titres" in s or "desactive les sous-titres" in s:
         edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"enabled": False})})
