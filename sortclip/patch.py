@@ -167,6 +167,29 @@ def _find_word_index(words: list[dict], target: str, occurrence: int = 0) -> int
         return None
 
 
+def _find_phrase_range(words: list[dict], phrase: str, occurrence: int = 0) -> tuple[int, int] | None:
+    """F2 (prompt amélioration commandes) : cherche une expression de
+    PLUSIEURS mots consécutifs (ex: "vraiment incroyable") dans `words`.
+    Avant ce fix, `_find_word_index` comparait la phrase entière à un seul
+    mot -> ne matchait jamais, donc une consigne visant plusieurs mots à la
+    fois était silencieusement ignorée. Renvoie (index_debut, index_fin
+    inclus) de la N-ième occurrence de la séquence, ou None."""
+    tokens = [_normalize_word(t) for t in phrase.split() if _normalize_word(t)]
+    if not tokens:
+        return None
+    n = len(tokens)
+    matches = []
+    for i in range(len(words) - n + 1):
+        if all(_normalize_word(words[i + j].get("word", "")) == tokens[j] for j in range(n)):
+            matches.append((i, i + n - 1))
+    if not matches:
+        return None
+    try:
+        return matches[occurrence]
+    except IndexError:
+        return None
+
+
 _ORDINAL_WORDS = {
     "premier": 0, "première": 0, "1er": 0, "1ere": 0, "1ère": 0,
     "deuxième": 1, "deuxieme": 1, "2e": 1, "2eme": 1, "2ème": 1,
@@ -464,15 +487,26 @@ def apply_text_adjustment(edl: EDL, instruction: str,
         target = _extract_target_word(instruction or "")
         occurrence = _extract_occurrence(instruction or "")
         idx = _find_word_index(words, target, occurrence) if target else None
-        if idx is not None:
+        # F2 : `target` peut être une expression de plusieurs mots (texte
+        # entre guillemets) — un seul mot ne matchera jamais dans ce cas,
+        # donc on tente aussi une séquence de mots consécutifs.
+        phrase_range = None
+        if idx is None and target and " " in target.strip():
+            phrase_range = _find_phrase_range(words, target, occurrence)
+        if idx is not None or phrase_range is not None:
             from .captions import map_words_to_output
             words_out = map_words_to_output(words, edl2)
-            if idx < len(words_out):
-                from .edl import EmphasisEvent
-                t_out = words_out[idx]["start"]
-                emphasis = EmphasisEvent(t=t_out, word_index=idx, style="pop")
-                edl2 = edl2.model_copy(update={"events": [*edl2.events, emphasis]})
-                notes.append(f"mise en valeur ajoutée sur « {words[idx]['word']} »")
+            from .edl import EmphasisEvent
+            indices = [idx] if idx is not None else list(range(phrase_range[0], phrase_range[1] + 1))
+            new_events = list(edl2.events)
+            added_texts = []
+            for i in indices:
+                if i < len(words_out):
+                    new_events.append(EmphasisEvent(t=words_out[i]["start"], word_index=i, style="pop"))
+                    added_texts.append(words[i]["word"])
+            if added_texts:
+                edl2 = edl2.model_copy(update={"events": new_events})
+                notes.append(f"mise en valeur ajoutée sur « {' '.join(added_texts)} »")
 
     # --- Retirer une mise en valeur précise, ou toutes (F3) ---
     if (("retire la mise en valeur sur" in s or "enlève la mise en valeur sur" in s
@@ -480,7 +514,24 @@ def apply_text_adjustment(edl: EDL, instruction: str,
         target = _extract_target_word(instruction or "")
         raw_instruction = instruction or ""
         has_ordinal = any(w in raw_instruction.lower() for w in _ORDINAL_WORDS)
-        if has_ordinal:
+        is_phrase = bool(target) and " " in target.strip()
+        if is_phrase:
+            # F2 : cible une expression de plusieurs mots. Avec ordinal ->
+            # cette occurrence précise ; sinon -> toutes les occurrences.
+            if has_ordinal:
+                rng = _find_phrase_range(words, target, _extract_occurrence(raw_instruction))
+                ranges = [rng] if rng else []
+            else:
+                ranges = []
+                occ = 0
+                while True:
+                    rng = _find_phrase_range(words, target, occ)
+                    if rng is None:
+                        break
+                    ranges.append(rng)
+                    occ += 1
+            target_ids = {i for rng in ranges for i in range(rng[0], rng[1] + 1)}
+        elif has_ordinal:
             # F1 : une occurrence précise a été demandée -> ne retire QUE celle-là.
             idx = _find_word_index(words, target, _extract_occurrence(raw_instruction)) if target else None
             target_ids = {idx} if idx is not None else set()
