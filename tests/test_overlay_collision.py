@@ -18,13 +18,13 @@ except ImportError:
     sys.exit(0)
 
 from sortclip.patch import apply_text_adjustment
-from sortclip.edl import EDL, Source, Interval, Background, Captions, Watermark, Canvas
+from sortclip.edl import EDL, Source, Interval, Background, Captions, Watermark, Canvas, TextOverlayEvent
 
 
-def _edl(captions_enabled=True, y=0.78):
+def _edl(captions_enabled=True, y=0.78, events=()):
     return EDL(
         source=Source(path="x.mp4", duration=10.0, width=1080, height=1920),
-        keeps=[Interval(start=0.0, end=10.0)],
+        keeps=[Interval(start=0.0, end=10.0)], events=list(events),
         background=Background(), captions=Captions(enabled=captions_enabled, y=y),
         watermark=Watermark(), canvas=Canvas(),
     )
@@ -45,6 +45,23 @@ def test_overlay_bottom_kept_when_captions_disabled():
 
 def test_overlay_top_never_repositioned():
     edl2, notes = apply_text_adjustment(_edl(), 'ajoute le titre "promo" en haut')
+    overlay = next(e for e in edl2.events if e.op == "text_overlay")
+    assert overlay.position == "top"
+
+
+# --- B2 : symétrique — descendre les sous-titres après coup ---------------
+
+def test_moving_captions_down_repositions_existing_bottom_overlay():
+    edl = _edl(y=0.55, events=[TextOverlayEvent(t=0.0, text="promo", position="bottom")])
+    edl2, notes = apply_text_adjustment(edl, "descends les sous-titres")
+    overlay = next(e for e in edl2.events if e.op == "text_overlay")
+    assert overlay.position == "center"
+    assert any("repositionné au centre" in n for n in notes)
+
+
+def test_moving_captions_down_leaves_top_overlay_alone():
+    edl = _edl(y=0.55, events=[TextOverlayEvent(t=0.0, text="promo", position="top")])
+    edl2, notes = apply_text_adjustment(edl, "descends les sous-titres")
     overlay = next(e for e in edl2.events if e.op == "text_overlay")
     assert overlay.position == "top"
 

@@ -375,6 +375,17 @@ def apply_text_adjustment(edl: EDL, instruction: str,
             edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(
                 update={"y": min(0.95, edl2.captions.y + 0.10)})})
             notes.append(f"sous-titres descendus (y={edl2.captions.y:.2f})")
+            # B2 (prompt amélioration commandes) : symétrique de E1 — descendre
+            # les sous-titres peut désormais les faire entrer en collision avec
+            # un texte incrusté déjà posé en "bottom". Sans ce contrôle, les
+            # deux se superposaient silencieusement.
+            if edl2.captions.y >= 0.65 and any(e.op == "text_overlay" and e.position == "bottom" for e in edl2.events):
+                new_events = [
+                    e.model_copy(update={"position": "center"}) if e.op == "text_overlay" and e.position == "bottom" else e
+                    for e in edl2.events
+                ]
+                edl2 = edl2.model_copy(update={"events": new_events})
+                notes.append("texte incrusté repositionné au centre pour ne pas recouvrir les sous-titres")
         # Graisse (A1)
         if "en gras" in s or "plus gras" in s:
             edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"bold": True})})
