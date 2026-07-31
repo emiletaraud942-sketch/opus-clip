@@ -60,7 +60,24 @@ def apply_patch(edl: EDL, ops: list[PatchOp]) -> PatchResult:
                 idx = by_id.get(op.event_id)
                 if idx is None or events[idx] is None or not op.field:
                     rejected.append(op); continue
-                events[idx] = events[idx].model_copy(update={op.field: op.value})
+                # Bug réel trouvé en auditant tout le repo : `model_copy(update=...)`
+                # NE REVALIDE RIEN — un patch venant du repli LLM (schéma
+                # d'outil sans contrainte de type sur `value`, cf.
+                # director.build_edit_tool) pouvait écrire n'importe quelle
+                # chaîne dans un champ à vocabulaire fermé (ex:
+                # FramingEvent.value hors wide/medium/tight), accepté et
+                # appliqué silencieusement, puis faire planter
+                # build_filter_complex (KeyError) au moment du rendu — bien
+                # après que ce module ait rapporté un succès. On revalide
+                # contre le VRAI schéma pydantic du type concerné ; en cas
+                # d'échec, l'op est rejetée comme n'importe quelle autre
+                # (jamais de levée, conforme à l'invariant de cette fonction).
+                old_event = events[idx]
+                try:
+                    candidate = old_event.model_copy(update={op.field: op.value})
+                    events[idx] = type(old_event).model_validate(candidate.model_dump())
+                except Exception:
+                    rejected.append(op); continue
                 applied.append(op)
 
             elif op.action == "add" and op.new:
