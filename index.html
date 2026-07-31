@@ -395,8 +395,8 @@
   // que AUTHORIZATION_ORIGINS côté backend (modal_app.py), qui revalide de
   // toute façon avant tout traitement.
   const AUTHORIZATION_DETAIL_PLACEHOLDERS = {
-    official_program: 'Nom du programme',
-    paid_campaign: 'Lien de la campagne',
+    official_program: 'Nom du programme (facultatif)',
+    paid_campaign: 'Lien de la campagne (facultatif)',
   };
   const authOriginRadios = document.querySelectorAll('input[name="authorization-origin"]');
   const authDetailInput = document.getElementById('authorization-detail');
@@ -423,19 +423,11 @@
     return { origin, detail };
   }
 
-  // Bloque AVANT tout upload/lancement si le détail requis manque — le
-  // contrôle backend existe aussi (défense en profondeur), mais on évite ici
-  // à l'utilisateur d'attendre un aller-retour réseau pour rien.
+  // Le nom du programme / lien de campagne est facultatif (l'origine seule
+  // est obligatoire, toujours renseignée puisque "Mon propre contenu" est
+  // sélectionné par défaut) — plus de blocage sur le détail ici.
   function validateAuthorizationOrGuide() {
-    const { origin, detail } = getAuthorization();
-    if ((origin === 'official_program' || origin === 'paid_campaign') && !detail) {
-      authOriginError.style.display = 'block';
-      authOriginError.textContent = origin === 'official_program'
-        ? 'Précise le nom du programme.'
-        : 'Précise le lien de la campagne.';
-      authDetailInput.focus();
-      return false;
-    }
+    authOriginError.style.display = 'none';
     return true;
   }
 

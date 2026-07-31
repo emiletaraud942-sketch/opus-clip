@@ -115,14 +115,10 @@ SITE_URL = "https://sortclip.fr"
 
 # Garde-fou produit obligatoire avant tout traitement : chaque vidéo doit
 # déclarer sur quelle base elle a le droit d'être clippée. Choix imposé (pas
-# de texte libre pour l'origine elle-même) — deux options exigent un détail
-# non vide (nom du programme / lien de la campagne), les deux autres non.
-AUTHORIZATION_ORIGINS = {
-    "own_content": {"requires_detail": False},
-    "official_program": {"requires_detail": True},
-    "paid_campaign": {"requires_detail": True},
-    "written_authorization": {"requires_detail": False},
-}
+# de texte libre pour l'origine elle-même). Le détail (nom du programme /
+# lien de la campagne) est facultatif pour toutes les origines — seule
+# l'origine elle-même est obligatoire.
+AUTHORIZATION_ORIGINS = {"own_content", "official_program", "paid_campaign", "written_authorization"}
 
 
 def _validate_authorization(payload: dict) -> tuple[str, str | None] | JSONResponse:
@@ -131,17 +127,10 @@ def _validate_authorization(payload: dict) -> tuple[str, str | None] | JSONRespo
     tester le type du retour avant de continuer."""
     origin = (payload.get("authorizationOrigin") or "").strip()
     detail = (payload.get("authorizationDetail") or "").strip() or None
-    spec = AUTHORIZATION_ORIGINS.get(origin)
-    if not spec:
+    if origin not in AUTHORIZATION_ORIGINS:
         return JSONResponse({
             "error": "Précise l'origine de l'autorisation pour cette vidéo avant de continuer.",
             "code": "authorization_origin_required",
-        }, status_code=400)
-    if spec["requires_detail"] and not detail:
-        label = "le nom du programme" if origin == "official_program" else "le lien de la campagne"
-        return JSONResponse({
-            "error": f"Précise {label} pour cette origine d'autorisation.",
-            "code": "authorization_detail_required",
         }, status_code=400)
     return origin, detail
 
