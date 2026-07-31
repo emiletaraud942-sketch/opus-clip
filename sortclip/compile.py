@@ -140,6 +140,18 @@ def _escape_filter_path(p: str) -> str:
     return p.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
+def _escape_drawtext(text: str) -> str:
+    """Échappe un texte pour la valeur `text=` d'un filtre drawtext — `:`
+    sépare les options du filtre, `%` déclenche l'expansion de motifs
+    drawtext (date, compteur...), `'`/`\\` cassent le guillemetage Python."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace(":", "\\:")
+        .replace("%", "\\%")
+    )
+
+
 def _audio_keeps_filter(edl: EDL, audio_label: str = "ka") -> tuple[str, str]:
     """Reconstruit UNIQUEMENT le sous-graphe audio (trim des `keeps` +
     concaténation), sans toucher à la vidéo. Utilisé deux fois : une fois pour
@@ -365,6 +377,21 @@ def build_filter_complex(edl: EDL, ass_path: str | None = None,
     chain = ["unsharp=5:5:0.3:5:5:0.0"]
     if edl.captions.enabled and ass_path:
         chain.append(f"ass=filename='{_escape_filter_path(ass_path)}'")
+    # Texte incrusté (titre/accroche, F8.3) — un drawtext par événement,
+    # limité dans le temps via enable='between(...)'. Ajouté AVANT le
+    # filigrane pour que le filigrane reste toujours visible au-dessus.
+    for e in sorted((e for e in edl.events if e.op == "text_overlay"), key=lambda e: e.t):
+        t0 = e.t
+        t1 = min(e.t + e.duration, edl.out_duration)
+        if t1 <= t0:
+            continue
+        y_expr = {"top": "h*0.08", "center": "(h-th)/2", "bottom": "h*0.80"}[e.position]
+        chain.append(
+            f"drawtext=text='{_escape_drawtext(e.text)}':"
+            f"fontcolor={_hex_to_ff(e.color)}:fontsize={e.size}:"
+            f"box=1:boxcolor=black@0.35:boxborderw=12:x=(w-tw)/2:y={y_expr}:"
+            f"enable='between(t,{t0:.3f},{t1:.3f})'"
+        )
     if edl.watermark.enabled:
         fs = max(20, c.w // 22)
         op = edl.watermark.opacity

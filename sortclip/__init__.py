@@ -16,7 +16,7 @@ Fondations posées :
 
 from .edl import (
     EDL, Interval, Canvas, Source, Background, Captions, Watermark,
-    FramingEvent, EmphasisEvent, HoldOnSpeakerEvent, SpeedEvent,
+    FramingEvent, EmphasisEvent, HoldOnSpeakerEvent, SpeedEvent, TextOverlayEvent,
     Framing, Transition, FRAMING_ZOOM, new_id,
 )
 from .presets import PRESETS, get_preset
@@ -34,7 +34,7 @@ __all__ = [
     "PatchOp", "PatchResult", "apply_patch", "apply_text_adjustment", "director",
     "extend_to_sentence_boundaries", "looks_like_sentence_start", "looks_like_sentence_end",
     "EDL", "Interval", "Canvas", "Source", "Background", "Captions", "Watermark",
-    "FramingEvent", "EmphasisEvent", "HoldOnSpeakerEvent", "SpeedEvent",
+    "FramingEvent", "EmphasisEvent", "HoldOnSpeakerEvent", "SpeedEvent", "TextOverlayEvent",
     "Framing", "Transition", "FRAMING_ZOOM", "new_id",
     "PRESETS", "get_preset",
     "build_edl", "clean_words",

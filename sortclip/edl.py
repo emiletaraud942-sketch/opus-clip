@@ -88,8 +88,23 @@ class SpeedEvent(BaseModel):
     factor: float = Field(ge=0.5, le=2.0)
 
 
+class TextOverlayEvent(BaseModel):
+    """Texte libre incrusté (titre, accroche, mention) — F8.3/F5 de l'audit
+    (AUDIT.md) : absent jusqu'ici, ajouté suite à une demande utilisateur
+    concrète ("ajoute un titre fixe en haut"). Reste dans le périmètre EDL
+    (pas de piste vidéo supplémentaire, juste un texte dessiné par-dessus)."""
+    op: Literal["text_overlay"] = "text_overlay"
+    id: str = Field(default_factory=new_id)
+    t: float = Field(ge=0, description="Seconde de SORTIE où le texte apparaît")
+    duration: float = Field(default=1e9, gt=0, description="Durée d'affichage ; par défaut tout le clip")
+    text: str = Field(min_length=1, max_length=200)
+    position: Literal["top", "center", "bottom"] = "top"
+    size: int = Field(default=54, ge=16, le=160)
+    color: str = "#FFFFFF"
+
+
 Event = Annotated[
-    Union[FramingEvent, EmphasisEvent, HoldOnSpeakerEvent, SpeedEvent],
+    Union[FramingEvent, EmphasisEvent, HoldOnSpeakerEvent, SpeedEvent, TextOverlayEvent],
     Field(discriminator="op"),
 ]
 

@@ -39,7 +39,13 @@ Place les événements de montage."""
 ADJUST_SYSTEM = """Tu ajustes un montage EXISTANT décrit par ses événements. On te donne la liste des événements (avec leur id stable) et une consigne en français. Tu produis des PATCHS qui modifient l'existant — tu ne repars jamais de zéro.
 - remove : retirer un événement (par id).
 - modify : changer un champ d'un événement (par id) — ex. field="value", value="wide".
-- add : ajouter un événement.
+- add : ajouter un événement. Types disponibles (champ "op" dans "new") :
+  - "framing" (t, value: wide/medium/tight)
+  - "emphasis" (t, word_index, style: pop/underline/scale)
+  - "text_overlay" (t, duration, text, position: top/center/bottom, size, color) —
+    texte libre incrusté (titre, accroche). Si la consigne demande un texte
+    incrusté SANS préciser le texte exact, NE DEVINE PAS le contenu : renvoie
+    zéro patch plutôt que d'inventer un texte que l'utilisateur n'a pas donné.
 Ne touche QUE ce que la consigne demande. Réponds avec le moins de patchs possible."""
 
 

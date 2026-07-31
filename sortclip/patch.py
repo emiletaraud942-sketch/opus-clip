@@ -16,6 +16,7 @@ Invariant : l'utilisateur doit voir changer ce qu'il a demandé et RIEN d'autre.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -64,9 +65,10 @@ def apply_patch(edl: EDL, ops: list[PatchOp]) -> PatchResult:
 
             elif op.action == "add" and op.new:
                 from .edl import (FramingEvent, EmphasisEvent,
-                                  HoldOnSpeakerEvent, SpeedEvent)
+                                  HoldOnSpeakerEvent, SpeedEvent, TextOverlayEvent)
                 kinds = {"framing": FramingEvent, "emphasis": EmphasisEvent,
-                         "hold_on_speaker": HoldOnSpeakerEvent, "speed": SpeedEvent}
+                         "hold_on_speaker": HoldOnSpeakerEvent, "speed": SpeedEvent,
+                         "text_overlay": TextOverlayEvent}
                 cls = kinds.get(op.new.get("op"))
                 if not cls:
                     rejected.append(op); continue
@@ -91,6 +93,55 @@ _COLOR_WORDS = {
     "cyan": "#22E5FF", "vert": "#22FF88", "orange": "#F39200",
 }
 
+# Texte incrusté (titre/accroche) — F8.3 de l'audit (AUDIT.md), absent avant
+# ce correctif : une consigne qui en demandait un était silencieusement
+# ignorée (repli LLM qui ne savait pas non plus le faire, faute de type
+# d'événement pour ça), rapportée comme "faite" sans rien changer.
+# "titre" seul (pas "sous-titre"/"sous titre", déjà géré par ailleurs) déclenche
+# le texte incrusté — bug réel rencontré : sans l'exclusion, "sous-titres"
+# contient la sous-chaîne "titre" et court-circuitait TOUTE consigne de
+# sous-titres (gras, position, style...) vers ce bloc.
+_OVERLAY_TRIGGER_RE = re.compile(r"(?<!sous-)(?<!sous )titre|incrust|overlay", re.IGNORECASE)
+_OVERLAY_LEADING_STRIP = re.compile(
+    r"^(ajoute|mets|met|écris|ecris|affiche|rajoute)\s+"
+    r"(un|une|le|la|des|du)?\s*(titre|texte)?\s*(fixe)?\s*[:\-]?\s*",
+    re.IGNORECASE,
+)
+_OVERLAY_TRAILING_STRIP = re.compile(
+    r"\s*(tout\s+)?(en\s+haut|en\s+bas|au\s+centre|au\s+milieu)"
+    r"(\s+de\s+la\s+vidéo|\s+de\s+la\s+video|\s+du\s+clip)?\s*$",
+    re.IGNORECASE,
+)
+_QUOTE_RE = re.compile(r"[\"“‘'«](.+?)[\"”’'»]")
+
+
+def _extract_overlay_text_and_position(instruction: str) -> tuple[str | None, str]:
+    """Extrait le texte à incruster et sa position depuis une consigne libre.
+    Priorité au texte ENTRE GUILLEMETS (fiable, sans ambiguïté) ; à défaut,
+    heuristique de retrait des verbes/position en tête et fin de phrase —
+    imparfait sur une phrase vraiment libre, mais couvre les formulations
+    courantes ("ajoute le titre XXX en haut", "écris XXX en bas", "mets
+    'XXX' comme titre"). Renvoie (texte ou None si rien d'exploitable,
+    position)."""
+    s_lower = instruction.lower()
+    position = "top"
+    if "en bas" in s_lower:
+        position = "bottom"
+    elif "au centre" in s_lower or "au milieu" in s_lower:
+        position = "center"
+    elif "en haut" in s_lower:
+        position = "top"
+
+    quoted = _QUOTE_RE.search(instruction)
+    if quoted:
+        text = quoted.group(1).strip()
+        return (text or None), position
+
+    stripped = _OVERLAY_LEADING_STRIP.sub("", instruction).strip()
+    stripped = _OVERLAY_TRAILING_STRIP.sub("", stripped).strip()
+    stripped = re.sub(r"^(comme titre|en titre)\s*[:\-]?\s*", "", stripped, flags=re.IGNORECASE).strip()
+    return (stripped or None), position
+
 
 def apply_text_adjustment(edl: EDL, instruction: str) -> tuple[EDL, list[str]]:
     """Traduit une consigne FR en patchs déterministes. Retourne (EDL, notes).
@@ -100,6 +151,19 @@ def apply_text_adjustment(edl: EDL, instruction: str) -> tuple[EDL, list[str]]:
     s = (instruction or "").lower()
     notes: list[str] = []
     edl2 = edl
+
+    # --- Texte incrusté (titre/accroche) ---
+    if _OVERLAY_TRIGGER_RE.search(s):
+        text, position = _extract_overlay_text_and_position(instruction or "")
+        if text:
+            from .edl import TextOverlayEvent
+            overlay = TextOverlayEvent(t=0.0, text=text[:200], position=position)
+            edl2 = edl2.model_copy(update={"events": [*edl2.events, overlay]})
+            notes.append(f"texte incrusté ajouté ({position}) : « {text} »")
+            return edl2, notes
+        # Déclencheur reconnu mais aucun texte exploitable extrait : mieux
+        # vaut basculer sur le repli LLM (qui peut demander/déduire un texte
+        # via le contexte) que de créer un overlay vide ou de faire semblant.
 
     # --- Cadrages / zooms ---
     if "moins de zoom" in s or "moins de cadrage" in s or "trop de zoom" in s:
