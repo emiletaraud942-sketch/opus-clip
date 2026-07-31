@@ -220,9 +220,26 @@ def apply_text_adjustment(edl: EDL, instruction: str,
         text, position = _extract_overlay_text_and_position(instruction or "")
         if text:
             from .edl import TextOverlayEvent
+            # E1 (prompt amélioration commandes) : le texte incrusté "bas" et
+            # les sous-titres occupent quasiment la même bande verticale par
+            # défaut (overlay "bottom" -> h*0.80, captions.y par défaut 0.78,
+            # cf. sortclip.captions margin_v = (1-y)*h -> même zone à ~2% de
+            # hauteur près). Sans ajustement, un overlay "en bas" superpose
+            # systématiquement le texte sur les sous-titres actifs. On le
+            # repousse au centre dans ce cas précis, en le documentant.
+            collision = (
+                position == "bottom"
+                and edl2.captions.enabled
+                and edl2.captions.y >= 0.65
+            )
+            if collision:
+                position = "center"
             overlay = TextOverlayEvent(t=0.0, text=text[:200], position=position)
             edl2 = edl2.model_copy(update={"events": [*edl2.events, overlay]})
-            notes.append(f"texte incrusté ajouté ({position}) : « {text} »")
+            note = f"texte incrusté ajouté ({position}) : « {text} »"
+            if collision:
+                note += " — repositionné au centre pour ne pas recouvrir les sous-titres"
+            notes.append(note)
             return edl2, notes
         # Déclencheur reconnu mais aucun texte exploitable extrait : mieux
         # vaut basculer sur le repli LLM (qui peut demander/déduire un texte
