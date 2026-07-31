@@ -223,6 +223,27 @@ def _extract_target_word(instruction: str) -> str | None:
     return words[-1] if words else None
 
 
+_DURATION_RE = re.compile(
+    r"pendant\s+(\d+(?:[.,]\d+)?)\s*(?:s\b|sec\b|secondes?\b)", re.IGNORECASE
+)
+
+
+def _extract_overlay_duration(instruction: str) -> float | None:
+    """E2 (prompt amélioration commandes) : le texte incrusté restait
+    TOUJOURS affiché sur tout le clip (duration=1e9 par défaut, cf.
+    TextOverlayEvent) — aucun moyen de dire "pendant 3 secondes". Renvoie la
+    durée en secondes si la consigne en précise une, sinon None (comportement
+    inchangé : affichage sur tout le clip)."""
+    m = _DURATION_RE.search(instruction or "")
+    if not m:
+        return None
+    try:
+        value = float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def apply_text_adjustment(edl: EDL, instruction: str,
                           words: list[dict] | None = None) -> tuple[EDL, list[str]]:
     """Traduit une consigne FR en patchs déterministes. Retourne (EDL, notes).
@@ -257,9 +278,15 @@ def apply_text_adjustment(edl: EDL, instruction: str,
             )
             if collision:
                 position = "center"
-            overlay = TextOverlayEvent(t=0.0, text=text[:200], position=position)
+            duration = _extract_overlay_duration(instruction or "")
+            overlay_kwargs = {"t": 0.0, "text": text[:200], "position": position}
+            if duration is not None:
+                overlay_kwargs["duration"] = duration
+            overlay = TextOverlayEvent(**overlay_kwargs)
             edl2 = edl2.model_copy(update={"events": [*edl2.events, overlay]})
-            note = f"texte incrusté ajouté ({position}) : « {text} »"
+            note = f"texte incrusté ajouté ({position}"
+            note += f", {duration:.0f}s" if duration is not None else ""
+            note += f") : « {text} »"
             if collision:
                 note += " — repositionné au centre pour ne pas recouvrir les sous-titres"
             notes.append(note)
