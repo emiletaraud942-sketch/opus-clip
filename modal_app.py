@@ -1465,7 +1465,8 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
     edl, _issues = validate(edl, word_count=len(words_out))
 
     ass_path = os.path.join(tmp, f"{Path(out_path).stem}.ass")
-    build_ass(words_out, edl.captions, edl.canvas, ass_path)
+    emphasis_indices = {e.word_index: e.style for e in edl.events if e.op == "emphasis"}
+    build_ass(words_out, edl.captions, edl.canvas, ass_path, emphasis_indices=emphasis_indices)
 
     result = edl_render(edl, out_path, ass_path=ass_path, words_out=words_out)
     if result.returncode != 0:
@@ -2247,7 +2248,8 @@ def _rerender_from_edl(edl_dict: dict, edl_words: list, resolution: str,
     edl, _ = validate(edl, word_count=len(edl_words or []))
     ass_path = os.path.join(tmp, "clip.ass")
     words_out = map_words_to_output(edl_words or [], edl)
-    build_ass(words_out, edl.captions, edl.canvas, ass_path)
+    emphasis_indices = {e.word_index: e.style for e in edl.events if e.op == "emphasis"}
+    build_ass(words_out, edl.captions, edl.canvas, ass_path, emphasis_indices=emphasis_indices)
     result = edl_render(edl, out_path, ass_path=ass_path, words_out=words_out)
     if result.returncode != 0:
         raise RuntimeError(f"re-rendu échoué : {result.stderr[-500:]}")
@@ -2350,7 +2352,8 @@ def split_clip(user_id: str, clip_id: str, at_seconds: float | None = None):
                 words_out = map_words_to_output(edl_words, edl_part)
                 ass_path = os.path.join(tmp, f"split_{suffix}.ass")
                 out_path = os.path.join(tmp, f"split_{suffix}.mp4")
-                build_ass(words_out, edl_part.captions, edl_part.canvas, ass_path)
+                emphasis_indices = {e.word_index: e.style for e in edl_part.events if e.op == "emphasis"}
+                build_ass(words_out, edl_part.captions, edl_part.canvas, ass_path, emphasis_indices=emphasis_indices)
                 result = edl_render(edl_part, out_path, ass_path=ass_path, words_out=words_out)
                 if result.returncode != 0:
                     print(f"[split_clip] rendu {label} échoué : {result.stderr[-300:]}")

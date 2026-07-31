@@ -244,6 +244,32 @@ def _extract_overlay_duration(instruction: str) -> float | None:
     return value if value > 0 else None
 
 
+def _source_to_output_indices(words: list[dict], edl: EDL, source_indices: set) -> dict:
+    """Bug réel trouvé en auditant tout le repo : `EmphasisEvent.word_index`
+    est censé référencer l'index dans `words_out` (même convention que
+    `director.py`, qui construit ses événements à partir de `words_out`) —
+    mais le code de retouche utilisait directement l'index dans `words`
+    (temps SOURCE, transcript AVANT remappage). `map_words_to_output` peut
+    SUPPRIMER des mots tombés dans un silence coupé, ce qui décale tous les
+    index suivants : sur un clip avec du silence supprimé (le cas normal,
+    c'est le cœur du produit), l'emphase pouvait finir posée sur le MAUVAIS
+    mot, ou hors bornes. Reproduit ce même critère de chevauchement que
+    `captions.map_words_to_output` — DOIT rester synchronisé avec elle.
+    Renvoie {index_source: index_dans_words_out} ; un mot absent du dict a
+    été supprimé (tombé dans un silence coupé), sans correspondance en sortie."""
+    keeps = edl.keeps
+    mapping: dict[int, int] = {}
+    out_idx = 0
+    for i, w in enumerate(words):
+        s, e = float(w["start"]), float(w["end"])
+        kept = any(s < k.end and e > k.start for k in keeps)
+        if kept:
+            if i in source_indices:
+                mapping[i] = out_idx
+            out_idx += 1
+    return mapping
+
+
 def apply_text_adjustment(edl: EDL, instruction: str,
                           words: list[dict] | None = None) -> tuple[EDL, list[str]]:
     """Traduit une consigne FR en patchs déterministes. Retourne (EDL, notes).
@@ -574,11 +600,17 @@ def apply_text_adjustment(edl: EDL, instruction: str,
             words_out = map_words_to_output(words, edl2)
             from .edl import EmphasisEvent
             indices = [idx] if idx is not None else list(range(phrase_range[0], phrase_range[1] + 1))
+            # `word_index` doit référencer l'index dans `words_out` (temps de
+            # SORTIE, même convention que director.py), pas dans `words`
+            # (temps SOURCE) — sinon l'emphase peut être posée sur le mauvais
+            # mot dès qu'un silence a été coupé AVANT le mot ciblé.
+            out_map = _source_to_output_indices(words, edl2, set(indices))
             new_events = list(edl2.events)
             added_texts = []
             for i in indices:
-                if i < len(words_out):
-                    new_events.append(EmphasisEvent(t=words_out[i]["start"], word_index=i, style="pop"))
+                out_i = out_map.get(i)
+                if out_i is not None and out_i < len(words_out):
+                    new_events.append(EmphasisEvent(t=words_out[out_i]["start"], word_index=out_i, style="pop"))
                     added_texts.append(words[i]["word"])
             if added_texts:
                 edl2 = edl2.model_copy(update={"events": new_events})
@@ -622,7 +654,13 @@ def apply_text_adjustment(edl: EDL, instruction: str,
                 if target_norm and _normalize_word(w.get("word", "")) == target_norm
             }
         if target_ids:
-            new_events = [e for e in edl2.events if not (e.op == "emphasis" and e.word_index in target_ids)]
+            # Même correction que pour l'ajout : `target_ids` référence
+            # `words` (temps SOURCE), mais `EmphasisEvent.word_index`
+            # référence `words_out` (temps SORTIE) — sans conversion, un
+            # retrait ciblé pouvait ne matcher aucun événement existant sur
+            # un clip avec du silence supprimé avant le mot ciblé.
+            out_ids = set(_source_to_output_indices(words, edl2, target_ids).values())
+            new_events = [e for e in edl2.events if not (e.op == "emphasis" and e.word_index in out_ids)]
             removed = len(edl2.events) - len(new_events)
             if removed:
                 edl2 = edl2.model_copy(update={"events": new_events})

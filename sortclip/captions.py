@@ -190,7 +190,30 @@ def _dialogue(start: float, end: float, text: str) -> str:
     return f"Dialogue: 0,{_fmt_time(start)},{_fmt_time(end)},Default,,0,0,0,,{text}"
 
 
-def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
+# Bug réel trouvé en auditant tout le repo : les événements "emphasis"
+# (« mets en valeur X » / réalisateur LLM) étaient créés, validés, stockés,
+# et rapportés comme un succès — mais AUCUN code ne les dessinait jamais.
+# `compile.py` ne les mentionne nulle part ; `build_ass` ignorait les
+# événements EDL. Résultat : la vidéo rendue était identique à avant, un
+# faux-succès silencieux de la même famille que ceux déjà corrigés cette
+# session (B1). Override ASS appliqué au mot concerné, réinitialisé juste
+# après avec `{\r}` pour ne pas affecter le reste de la ligne.
+_EMPHASIS_ASS_OVERRIDE = {
+    "pop": r"{\b1\fscx130\fscy130}",
+    "underline": r"{\u1}",
+    "scale": r"{\fscx150\fscy150}",
+}
+
+
+def _apply_emphasis_ass(text: str, style: str | None) -> str:
+    override = _EMPHASIS_ASS_OVERRIDE.get(style) if style else None
+    if not override:
+        return text
+    return f"{override}{text}{{\\r}}"
+
+
+def build_ass(words_out: list[dict], captions, canvas, path: str,
+             emphasis_indices: dict[int, str] | None = None) -> str:
     """Écrit un fichier .ass depuis des mots en TEMPS SORTIE. Retourne le chemin.
 
     - style "karaoke": mot-à-mot, surbrillance progressive via \\k — groupés
@@ -207,6 +230,12 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
     """
     from pathlib import Path
 
+    # Associe le style d'emphase (posé par index dans le words_out D'ORIGINE,
+    # même convention que director.py) à chaque mot AVANT tout filtrage/
+    # regroupement, pour que l'information survive au filtrage bas-confiance
+    # ci-dessous (qui peut retirer des mots et décaler les positions).
+    emphasis_indices = emphasis_indices or {}
+    words_out = [dict(w, _emphasis=emphasis_indices.get(i)) for i, w in enumerate(words_out)]
     words_out = filter_low_confidence_words(words_out)
     lines = [_ass_header(captions, canvas)]
 
@@ -226,10 +255,13 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
                 chunks = []
                 for w in g:
                     cs = max(1, int(round((w["end"] - w["start"]) * 100)))
-                    chunks.append(f"{{\\k{cs}}}{_sanitize_ass_text(w['word'])}")
+                    word_text = _apply_emphasis_ass(_sanitize_ass_text(w["word"]), w.get("_emphasis"))
+                    chunks.append(f"{{\\k{cs}}}{word_text}")
                 lines.append(_dialogue(start, end, " ".join(chunks)))
             else:
-                lines.append(_dialogue(start, end, " ".join(_sanitize_ass_text(w["word"]) for w in g)))
+                lines.append(_dialogue(start, end, " ".join(
+                    _apply_emphasis_ass(_sanitize_ass_text(w["word"]), w.get("_emphasis")) for w in g
+                )))
     else:
         from .subtitles_fr import break_lines_fr, group_into_blocks, apply_french_typography
         # Découpe d'abord sur les pauses (mêmes règles que ci-dessus), PUIS
@@ -246,7 +278,9 @@ def build_ass(words_out: list[dict], captions, canvas, path: str) -> str:
             start = block_words[0]["start"]
             end = block_words[-1]["end"]
             text = "\\N".join(
-                apply_french_typography(" ".join(_sanitize_ass_text(w["word"]) for w in line))
+                apply_french_typography(" ".join(
+                    _apply_emphasis_ass(_sanitize_ass_text(w["word"]), w.get("_emphasis")) for w in line
+                ))
                 for line in block
             )
             lines.append(_dialogue(start, end, text))
