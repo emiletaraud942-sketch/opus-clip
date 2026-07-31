@@ -339,11 +339,20 @@ def apply_text_adjustment(edl: EDL, instruction: str,
     # NOTE : out_duration est une PROPRIÉTÉ CALCULÉE depuis `keeps` (voir
     # edl.py) — on ne la passe jamais à model_copy(update=...), elle se
     # recalcule automatiquement dès que `keeps` change.
+    # C1 (prompt amélioration commandes) : un trim de durée fixe pouvait
+    # tomber EN PLEIN milieu d'un mot (ex: le mot commence à 1.8s, le trim de
+    # 2s le coupe à sa moitié) -> son audio était haché. On décale le point de
+    # coupe vers le silence le plus proche (temps SOURCE, mêmes `words` que le
+    # reste du module) quand un transcript est disponible.
+    from .clipops import snap_split_to_word_boundary as _snap_trim
     if ("coupe le début" in s or "coupe le debut" in s or "raccourcis le début" in s
             or "enlève le début" in s or "enleve le debut" in s):
         keeps = sorted(edl2.keeps, key=lambda k: k.start)
         if keeps and (keeps[0].end - keeps[0].start) > (TRIM_SECONDS + 1.0):
-            new_first = keeps[0].model_copy(update={"start": keeps[0].start + TRIM_SECONDS})
+            new_start = keeps[0].start + TRIM_SECONDS
+            if words:
+                new_start = _snap_trim(new_start, words)
+            new_first = keeps[0].model_copy(update={"start": new_start})
             new_keeps = [new_first, *keeps[1:]]
             edl2 = edl2.model_copy(update={"keeps": new_keeps})
             notes.append(f"début raccourci de {TRIM_SECONDS:.0f}s")
@@ -351,7 +360,10 @@ def apply_text_adjustment(edl: EDL, instruction: str,
             or "enlève la fin" in s or "enleve la fin" in s):
         keeps = sorted(edl2.keeps, key=lambda k: k.start)
         if keeps and (keeps[-1].end - keeps[-1].start) > (TRIM_SECONDS + 1.0):
-            new_last = keeps[-1].model_copy(update={"end": keeps[-1].end - TRIM_SECONDS})
+            new_end = keeps[-1].end - TRIM_SECONDS
+            if words:
+                new_end = _snap_trim(new_end, words)
+            new_last = keeps[-1].model_copy(update={"end": new_end})
             new_keeps = [*keeps[:-1], new_last]
             edl2 = edl2.model_copy(update={"keeps": new_keeps})
             notes.append(f"fin raccourcie de {TRIM_SECONDS:.0f}s")
