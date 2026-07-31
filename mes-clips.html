@@ -618,11 +618,16 @@
           <div style="margin-top:12px;padding:10px;background:#0f0f14;border:1px solid #2a2a35;border-radius:10px;">
             <!-- Catégorie unique : toutes les retouches (EDL + actions sur le
                  clip + panneaux avancés) vivent dans le panneau Commandes. -->
-            <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:2px;">Ce clip ne vous convient pas ?</div>
-            <div style="font-size:11px;color:#86efac;margin-bottom:8px;">Les retouches sont illimitées et gratuites.</div>
+            <!-- Message conçu pour PROVOQUER la première retouche pendant
+                 l'essai — ne pas se contenter d'informer que la fonction
+                 existe (le "essai gratuit" ne convainc que si l'utilisateur
+                 la VIT). Nomme des frustrations concrètes et fréquentes
+                 plutôt qu'une formulation abstraite ("modifiez ce clip"). -->
+            <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:2px;">Le cadrage, le titre ou les sous-titres ne vous conviennent pas ?</div>
+            <div style="font-size:11px;color:#86efac;margin-bottom:8px;">Changez-le en un clic ci-dessous — retouches illimitées et gratuites, aucune carte bancaire requise.</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
               <button data-commands="${c.id}"
-                style="background:#8b5cf6;color:#fff;border:0;font-size:12px;font-weight:800;padding:9px 18px;border-radius:9999px;cursor:pointer;">📋 Commandes</button>
+                style="background:#8b5cf6;color:#fff;border:0;font-size:12px;font-weight:800;padding:9px 18px;border-radius:9999px;cursor:pointer;">📋 Essayer une retouche</button>
               <span data-adjust-status="${c.id}" style="font-size:11px;color:#9ca3af;"></span>
             </div>
             <!-- A1 : compteur de retouches gratuites de CE clip, en permanence -->
