@@ -147,17 +147,43 @@ def _normalize_word(w: str) -> str:
     return (w or "").strip().strip(".,!?…:;»«\"'").lower()
 
 
-def _find_word_index(words: list[dict], target: str) -> int | None:
+def _find_word_index(words: list[dict], target: str, occurrence: int = 0) -> int | None:
     """Cherche `target` (mot ou courte expression) dans `words` (temps
     SOURCE, transcript nettoyé) — comparaison insensible à la casse et à la
-    ponctuation. Renvoie l'index du PREMIER mot correspondant, ou None."""
+    ponctuation. `occurrence` (F1, prompt amélioration commandes) sélectionne
+    la N-ième occurrence (0 = première, -1 = dernière) quand le mot revient
+    plusieurs fois dans le clip — sans ça, une consigne ne pouvait jamais
+    viser autre chose que la toute première apparition. Renvoie None si
+    l'occurrence demandée n'existe pas."""
     target_norm = _normalize_word(target)
     if not target_norm:
         return None
-    for i, w in enumerate(words):
-        if _normalize_word(w.get("word", "")) == target_norm:
-            return i
-    return None
+    matches = [i for i, w in enumerate(words) if _normalize_word(w.get("word", "")) == target_norm]
+    if not matches:
+        return None
+    try:
+        return matches[occurrence]
+    except IndexError:
+        return None
+
+
+_ORDINAL_WORDS = {
+    "premier": 0, "première": 0, "1er": 0, "1ere": 0, "1ère": 0,
+    "deuxième": 1, "deuxieme": 1, "2e": 1, "2eme": 1, "2ème": 1,
+    "troisième": 2, "troisieme": 2, "3e": 2, "3eme": 2, "3ème": 2,
+    "quatrième": 3, "quatrieme": 3, "4e": 3, "4eme": 3, "4ème": 3,
+    "dernier": -1, "dernière": -1,
+}
+
+
+def _extract_occurrence(instruction: str) -> int:
+    """F1 : détecte « la deuxième fois », « le dernier », etc. dans la
+    consigne. Défaut 0 (première occurrence) — comportement historique."""
+    low = (instruction or "").lower()
+    for word, idx in _ORDINAL_WORDS.items():
+        if word in low:
+            return idx
+    return 0
 
 
 _QUOTED_OR_LAST_WORD_RE = re.compile(r"[\"“‘'«](.+?)[\"”’'»]")
@@ -385,7 +411,8 @@ def apply_text_adjustment(edl: EDL, instruction: str,
     if (("mets en valeur" in s or "met en valeur" in s or "surligne" in s
          or "mets l'emphase sur" in s or "met l'emphase sur" in s) and words):
         target = _extract_target_word(instruction or "")
-        idx = _find_word_index(words, target) if target else None
+        occurrence = _extract_occurrence(instruction or "")
+        idx = _find_word_index(words, target, occurrence) if target else None
         if idx is not None:
             from .captions import map_words_to_output
             words_out = map_words_to_output(words, edl2)
@@ -400,12 +427,28 @@ def apply_text_adjustment(edl: EDL, instruction: str,
     if (("retire la mise en valeur sur" in s or "enlève la mise en valeur sur" in s
          or "retire l'emphase sur" in s or "enlève l'emphase sur" in s) and words):
         target = _extract_target_word(instruction or "")
-        idx = _find_word_index(words, target) if target else None
-        if idx is not None:
-            new_events = [e for e in edl2.events if not (e.op == "emphasis" and e.word_index == idx)]
-            if len(new_events) < len(edl2.events):
+        raw_instruction = instruction or ""
+        has_ordinal = any(w in raw_instruction.lower() for w in _ORDINAL_WORDS)
+        if has_ordinal:
+            # F1 : une occurrence précise a été demandée -> ne retire QUE celle-là.
+            idx = _find_word_index(words, target, _extract_occurrence(raw_instruction)) if target else None
+            target_ids = {idx} if idx is not None else set()
+        else:
+            # Sans ordinal, la consigne est ambiguë si le mot revient plusieurs
+            # fois : on retire TOUTES les mises en valeur posées sur ce mot
+            # plutôt que de silencieusement n'agir que sur la première
+            # occurrence (comportement précédent, jamais documenté comme tel).
+            target_norm = _normalize_word(target) if target else None
+            target_ids = {
+                i for i, w in enumerate(words)
+                if target_norm and _normalize_word(w.get("word", "")) == target_norm
+            }
+        if target_ids:
+            new_events = [e for e in edl2.events if not (e.op == "emphasis" and e.word_index in target_ids)]
+            removed = len(edl2.events) - len(new_events)
+            if removed:
                 edl2 = edl2.model_copy(update={"events": new_events})
-                notes.append(f"mise en valeur retirée sur « {words[idx]['word']} »")
+                notes.append(f"mise en valeur retirée sur « {target} » ({removed} occurrence(s))")
     elif "retire toutes les mises en valeur" in s or "aucune mise en valeur" in s or "sans mise en valeur" in s:
         new_events = [e for e in edl2.events if e.op != "emphasis"]
         if len(new_events) < len(edl2.events):
