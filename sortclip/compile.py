@@ -355,9 +355,18 @@ def build_filter_complex(edl: EDL, ass_path: str | None = None,
 
     # --- 4. Fond -------------------------------------------------------------
     if edl.background.mode == "blur":
+        # D1 (prompt amélioration commandes) : `sigma` est appliqué APRÈS le
+        # scale vers la résolution du canevas -> un même sigma fixe (25) rend
+        # un flou moitié moins fort en 4K (3840x2160, cf. OUTPUT_RESOLUTIONS)
+        # qu'en 1080p, alors que l'utilisateur choisit "flou léger/fort" sans
+        # savoir quelle résolution de sortie sera utilisée. On met le sigma à
+        # l'échelle du canevas réel, calibré sur la référence 1920px de haut
+        # sur laquelle la valeur par défaut (25) a été choisie.
+        _REFERENCE_CANVAS_H = 1920
+        effective_sigma = edl.background.sigma * (c.h / _REFERENCE_CANVAS_H)
         parts.append(
             f"[bgsrc]scale={c.w}:{c.h}:force_original_aspect_ratio=increase:flags=lanczos,"
-            f"crop={c.w}:{c.h},gblur=sigma={edl.background.sigma},setsar=1[bg]"
+            f"crop={c.w}:{c.h},gblur=sigma={effective_sigma:.2f},setsar=1[bg]"
         )
     elif edl.background.mode == "solid":
         col = _hex_to_ff(edl.background.color)
