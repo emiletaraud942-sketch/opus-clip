@@ -458,6 +458,19 @@ def apply_text_adjustment(edl: EDL, instruction: str,
             update={"mode": "solid", "color": color})})
         notes.append(f"fond en couleur unie ({color})")
 
+    # --- Fond assorti à la vidéo (D2, prompt amélioration commandes) ---
+    # Avant ce fix, un fond en couleur unie ne pouvait être qu'une couleur
+    # manuelle de la palette fixe (_COLOR_WORDS) ou noir — jamais assortie au
+    # contenu réel de la vidéo, ce qui donnait un rendu discordant sur un fond
+    # aux couleurs marquées.
+    if "fond" in s and ("assorti" in s or "couleur dominante" in s or "couleur de la vidéo" in s or "couleur de la video" in s):
+        if edl2.source.dominant_color:
+            edl2 = edl2.model_copy(update={"background": edl2.background.model_copy(
+                update={"mode": "solid", "color": edl2.source.dominant_color})})
+            notes.append(f"fond assorti à la couleur dominante de la vidéo ({edl2.source.dominant_color})")
+        else:
+            notes.append("couleur dominante indisponible pour cette vidéo (générée avant ce correctif)")
+
     # --- Plein cadre, sans fond (bandes noires plutôt que flou) (F5) ---
     if ("plein cadre" in s or "sans fond" in s or "retire le fond" in s
             or "enlève le fond" in s or "pas de fond" in s):

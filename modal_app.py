@@ -642,7 +642,7 @@ def extract_signals(video_path: str) -> dict:
     pipeline : en cas d'erreur, renvoie des listes vides."""
     signals = {
         "energy_peaks": [], "laughter": [], "shot_changes": [], "face_ratio": None,
-        "face_x": None,
+        "face_x": None, "dominant_color": None,
         "rms_times": [], "rms_z": [],
     }
 
@@ -757,6 +757,38 @@ def extract_signals(video_path: str) -> dict:
             signals["face_x"] = round(face_x_samples[len(face_x_samples) // 2], 3)
     except Exception as exc:
         print(f"[extract_signals] visages ignorés: {exc}")
+
+    # --- Couleur dominante (D2, prompt amélioration commandes) : moyenne des
+    # couleurs sur quelques images échantillonnées, pour un fond "assorti à la
+    # vidéo" au lieu d'un choix manuel dans une palette fixe. Moyenne GROSSIÈRE
+    # sur tout le clip : ne distingue pas des scènes de couleurs très
+    # différentes (ex: alterne fond blanc et fond sombre).
+    try:
+        import cv2
+        import numpy as np
+        cap = cv2.VideoCapture(video_path)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        step = max(1, int(fps * 3))
+        idx = 0
+        sums = np.zeros(3)
+        n = 0
+        while n < 20:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok:
+                break
+            sums += frame.mean(axis=(0, 1))  # moyenne B,G,R de l'image
+            n += 1
+            idx += step
+            if total and idx >= total:
+                break
+        cap.release()
+        if n:
+            b, g, r = (sums / n).astype(int).clip(0, 255)
+            signals["dominant_color"] = f"#{r:02X}{g:02X}{b:02X}"
+    except Exception as exc:
+        print(f"[extract_signals] couleur dominante ignorée: {exc}")
 
     return signals
 
@@ -1357,6 +1389,7 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
         words=clip_words, preset_name=preset_name, watermark=watermark,
         source_width=sw, source_height=sh,
         source_face_x=(signals or {}).get("face_x"),
+        source_dominant_color=(signals or {}).get("dominant_color"),
     )
 
     width, height = OUTPUT_RESOLUTIONS[resolution]

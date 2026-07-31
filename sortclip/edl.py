@@ -169,6 +169,11 @@ class Source(BaseModel):
     # moyenne STATIQUE sur tout le clip : un locuteur qui se déplace ou un
     # changement de locuteur ne sont PAS suivis dans le temps.
     face_x: float | None = Field(default=None, ge=0.0, le=1.0)
+    # D2 (prompt amélioration commandes) : couleur dominante moyenne calculée
+    # une fois à la génération par extract_signals() — permet un fond en
+    # couleur unie assorti à la vidéo au lieu d'un choix manuel dans une
+    # palette fixe. None si non calculée (clips générés avant ce correctif).
+    dominant_color: str | None = None
 
 
 # --------------------------------------------------------------------------
