@@ -106,6 +106,21 @@
       </label>
     </div>
 
+    <!-- Catégories créées librement par l'utilisateur pour ranger ses clips
+         (distinct du filtre par campagne ci-dessus, dérivé automatiquement
+         de l'origine déclarée à l'upload). -->
+    <div id="category-box" style="display:none;margin-bottom:16px;align-items:flex-end;gap:12px;flex-wrap:wrap;">
+      <label style="font-size:12px;color:#9ca3af;">
+        Filtrer par catégorie
+        <select id="category-filter" style="display:block;margin-top:4px;background:#17171d;border:1px solid #2a2a35;color:#fff;font-size:13px;padding:8px 12px;border-radius:8px;min-width:200px;">
+          <option value="">Toutes les catégories</option>
+          <option value="__none__">Sans catégorie</option>
+        </select>
+      </label>
+      <button id="category-create" type="button" style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:12px;font-weight:700;padding:9px 16px;border-radius:9999px;cursor:pointer;">+ Nouvelle catégorie</button>
+      <button id="category-delete" type="button" style="display:none;background:transparent;border:1px solid #7c2d2d;color:#fca5a5;font-size:12px;font-weight:700;padding:9px 16px;border-radius:9999px;cursor:pointer;">Supprimer cette catégorie</button>
+    </div>
+
     <div id="clips-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;"></div>
   </div>
 </section>
@@ -621,6 +636,59 @@
           campaignValues.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(''));
       }
 
+      // Catégories manuelles : créées librement par l'utilisateur pour
+      // ranger ses clips (distinct du filtre par campagne ci-dessus).
+      const categoryBox = document.getElementById('category-box');
+      const categoryFilterSelect = document.getElementById('category-filter');
+      const categoryCreateBtn = document.getElementById('category-create');
+      const categoryDeleteBtn = document.getElementById('category-delete');
+      let categories = [];
+
+      async function loadCategories() {
+        const { data } = await supabase.from('clip_categories').select('*')
+          .eq('user_id', session.user.id).order('name');
+        categories = data || [];
+        categoryFilterSelect.innerHTML =
+          '<option value="">Toutes les catégories</option><option value="__none__">Sans catégorie</option>'
+          + categories.map(cat => `<option value="${cat.id}">${esc(cat.name)}</option>`).join('');
+        categoryBox.style.display = 'flex';
+      }
+      await loadCategories();
+
+      function categorySelectHtml(c) {
+        const options = ['<option value="">Sans catégorie</option>']
+          .concat(categories.map(cat => `<option value="${cat.id}" ${c.category_id === cat.id ? 'selected' : ''}>${esc(cat.name)}</option>`));
+        return `<select data-set-category="${c.id}" style="background:#0f0f14;border:1px solid #2a2a35;color:#9ca3af;font-size:11px;padding:4px 8px;border-radius:6px;">${options.join('')}</select>`;
+      }
+
+      categoryCreateBtn.addEventListener('click', async () => {
+        const name = (window.prompt('Nom de la nouvelle catégorie :', '') || '').trim();
+        if (!name) return;
+        const { error } = await supabase.from('clip_categories').insert({ user_id: session.user.id, name });
+        if (error) { alert(error.code === '23505' ? 'Cette catégorie existe déjà.' : `Erreur : ${error.message}`); return; }
+        await loadCategories();
+        applyFilters();
+      });
+
+      categoryFilterSelect.addEventListener('change', () => {
+        categoryDeleteBtn.style.display = categoryFilterSelect.value && categoryFilterSelect.value !== '__none__' ? 'inline-block' : 'none';
+        applyFilters();
+      });
+
+      categoryDeleteBtn.addEventListener('click', async () => {
+        const catId = categoryFilterSelect.value;
+        const cat = categories.find(c => c.id === catId);
+        if (!cat) return;
+        if (!window.confirm(`Supprimer la catégorie « ${cat.name} » ? Les clips qu'elle contient ne seront PAS supprimés, juste sans catégorie.`)) return;
+        const { error } = await supabase.from('clip_categories').delete().eq('id', catId);
+        if (error) { alert(`Erreur : ${error.message}`); return; }
+        rows.forEach(r => { if (r.category_id === catId) r.category_id = null; });
+        categoryFilterSelect.value = '';
+        categoryDeleteBtn.style.display = 'none';
+        await loadCategories();
+        applyFilters();
+      });
+
       const grid = document.getElementById('clips-grid');
       function renderGrid(list) {
       grid.innerHTML = list.map(c => {
@@ -644,6 +712,7 @@
           </div>
           <div style="font-size:12px;color:#6b7280;margin-bottom:12px;">${new Date(c.created_at).toLocaleDateString('fr-FR')} · ${Math.round(c.end_time - c.start_time)}s</div>
           ${campaignLabel(c) ? `<div style="display:inline-block;background:#1b1420;border:1px solid #3a2a55;color:#c4b5fd;font-size:10px;font-weight:700;padding:3px 9px;border-radius:9999px;margin-bottom:10px;">${esc(campaignLabel(c))}</div>` : ''}
+          <div style="margin-bottom:10px;">${categorySelectHtml(c)}</div>
           <div style="display:flex;gap:8px;">
             <button data-open="${esc(c.storage_path)}" style="flex:1;background:#2a2a35;color:#fff;border:0;font-size:12px;font-weight:700;padding:9px;border-radius:9999px;cursor:pointer;">▶ Ouvrir</button>
             <button data-download="${esc(c.storage_path)}" data-name="${dl}" style="flex:1;background:#f43f8e;color:#fff;border:0;font-size:12px;font-weight:700;padding:9px;border-radius:9999px;cursor:pointer;">⬇ Télécharger</button>
@@ -688,12 +757,20 @@
         </div>`;
       }).join('');
       }
-      renderGrid(rows);
+      // Combine le filtre campagne ET le filtre catégorie (les deux peuvent
+      // être actifs en même temps, sur des critères indépendants).
+      function applyFilters() {
+        let list = rows;
+        const campaignValue = campaignFilterSelect.value;
+        if (campaignValue) list = list.filter(c => campaignLabel(c) === campaignValue);
+        const categoryValue = categoryFilterSelect.value;
+        if (categoryValue === '__none__') list = list.filter(c => !c.category_id);
+        else if (categoryValue) list = list.filter(c => c.category_id === categoryValue);
+        renderGrid(list);
+      }
+      applyFilters();
 
-      campaignFilterSelect.addEventListener('change', () => {
-        const value = campaignFilterSelect.value;
-        renderGrid(value ? rows.filter(c => campaignLabel(c) === value) : rows);
-      });
+      campaignFilterSelect.addEventListener('change', applyFilters);
 
       // A2 : si aucune retouche n'a été faite 30 s après l'affichage d'un clip
       // sans EDL retouché, on relance discrètement l'invitation (léger
@@ -709,6 +786,20 @@
           btn.style.boxShadow = '0 0 0 4px rgba(139,92,246,.35)';
           setTimeout(() => { btn.style.boxShadow = 'none'; }, 2200);
         }, 30000);
+      });
+
+      grid.addEventListener('change', async (e) => {
+        const sel = e.target.closest('[data-set-category]');
+        if (!sel) return;
+        const clipId = sel.getAttribute('data-set-category');
+        const categoryId = sel.value || null;
+        sel.disabled = true;
+        const { error } = await supabase.from('clips').update({ category_id: categoryId }).eq('id', clipId);
+        sel.disabled = false;
+        if (error) { alert(`Erreur : ${error.message}`); return; }
+        if (clipsById[clipId]) clipsById[clipId].category_id = categoryId;
+        const row = rows.find(r => r.id === clipId);
+        if (row) row.category_id = categoryId;
       });
 
       grid.addEventListener('click', async (e) => {
