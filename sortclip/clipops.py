@@ -40,3 +40,32 @@ def split_events_at_output_time(events: list[Event], t_split: float) -> tuple[li
     before = [e for e in events if e.t < t_split]
     after = [e.model_copy(update={"t": e.t - t_split}) for e in events if e.t >= t_split]
     return before, after
+
+
+def snap_split_to_word_boundary(t_split: float, words_out: list[dict],
+                                 max_shift: float = 1.0) -> float:
+    """G1 (prompt amélioration commandes) : ajuste `t_split` (temps de
+    SORTIE) pour tomber dans un silence entre deux mots plutôt qu'au milieu
+    d'un mot — sans ça, « scinder » pouvait couper un mot en deux, avec la
+    moitié de son audio/sous-titre de chaque côté.
+
+    Ne décale JAMAIS de plus de `max_shift` secondes (au-delà, on considère
+    qu'aucun silence exploitable n'est proche et on renvoie `t_split` tel
+    quel plutôt que de déplacer arbitrairement le point demandé par
+    l'utilisateur). Ne gère qu'un seul locuteur / des mots non chevauchants ;
+    des `words_out` désordonnés ou se chevauchant ne sont pas garantis."""
+    if not words_out:
+        return t_split
+    for w in words_out:
+        start, end = float(w["start"]), float(w["end"])
+        if start <= t_split < end:
+            # t_split tombe DANS un mot -> décale vers le bord le plus proche,
+            # dans la limite de max_shift.
+            to_start = t_split - start
+            to_end = end - t_split
+            if to_start <= to_end and to_start <= max_shift:
+                return start
+            if to_end <= max_shift:
+                return end
+            return t_split  # ni l'un ni l'autre bord n'est assez proche
+    return t_split

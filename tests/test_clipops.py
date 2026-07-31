@@ -13,7 +13,9 @@ except ImportError:
     sys.exit(0)
 
 from sortclip.edl import Interval, FramingEvent, EmphasisEvent
-from sortclip.clipops import split_keeps_at_output_time, split_events_at_output_time
+from sortclip.clipops import (
+    split_keeps_at_output_time, split_events_at_output_time, snap_split_to_word_boundary,
+)
 
 
 def test_split_keeps_single_interval_in_the_middle():
@@ -61,6 +63,44 @@ def test_split_events_reassigns_and_shifts_second_half():
 def test_split_events_empty_list():
     before, after = split_events_at_output_time([], 5.0)
     assert before == [] and after == []
+
+
+# --- G1 (prompt amélioration commandes) : point de scission au silence -----
+
+WORDS_OUT = [
+    {"word": "bonjour", "start": 0.0, "end": 0.5},
+    {"word": "tout", "start": 0.6, "end": 0.9},
+    {"word": "le", "start": 0.9, "end": 1.0},
+    {"word": "monde", "start": 1.0, "end": 1.4},
+]
+
+
+def test_snap_split_leaves_boundary_in_a_gap_unchanged():
+    # 0.55s tombe déjà dans le silence entre "bonjour" et "tout".
+    assert snap_split_to_word_boundary(0.55, WORDS_OUT) == 0.55
+
+
+def test_snap_split_moves_out_of_mid_word_cut():
+    # Preuve du problème (avant fix) : couper à 1.2s tombait EN PLEIN dans
+    # "monde" (1.0-1.4), le coupant en deux. Le point doit être décalé sur
+    # un bord du mot, jamais laissé à l'intérieur.
+    snapped = snap_split_to_word_boundary(1.2, WORDS_OUT)
+    assert snapped in (1.0, 1.4)
+    assert not any(w["start"] < snapped < w["end"] for w in WORDS_OUT)
+
+
+def test_snap_split_picks_nearest_edge():
+    # 1.05s est plus proche du début (1.0) que de la fin (1.4) de "monde".
+    assert snap_split_to_word_boundary(1.05, WORDS_OUT) == 1.0
+
+
+def test_snap_split_gives_up_beyond_max_shift():
+    words = [{"word": "long", "start": 0.0, "end": 10.0}]
+    assert snap_split_to_word_boundary(5.0, words, max_shift=1.0) == 5.0
+
+
+def test_snap_split_no_words_returns_unchanged():
+    assert snap_split_to_word_boundary(3.0, []) == 3.0
 
 
 if __name__ == "__main__":

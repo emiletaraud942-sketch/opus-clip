@@ -2254,7 +2254,9 @@ def split_clip(user_id: str, clip_id: str, at_seconds: float | None = None):
     n'est jamais modifié ni supprimé."""
     from sortclip import EDL, map_words_to_output, build_ass, render as edl_render, validate
     from sortclip.edl import Canvas
-    from sortclip.clipops import split_keeps_at_output_time, split_events_at_output_time
+    from sortclip.clipops import (
+        split_keeps_at_output_time, split_events_at_output_time, snap_split_to_word_boundary,
+    )
 
     supabase = get_supabase_client()
     row = supabase.table("clips").select("*").eq("id", clip_id).maybe_single().execute().data
@@ -2264,6 +2266,11 @@ def split_clip(user_id: str, clip_id: str, at_seconds: float | None = None):
     try:
         edl0 = EDL.model_validate(row["edl"])
         t_split = at_seconds if at_seconds and 0 < at_seconds < edl0.out_duration else edl0.out_duration / 2
+        # G1 : ne coupe jamais un mot en deux — décale vers le silence le
+        # plus proche (dans la limite de 1s) plutôt que de découper à la
+        # milliseconde demandée.
+        words_out_for_snap = map_words_to_output(row.get("edl_words") or [], edl0)
+        t_split = snap_split_to_word_boundary(t_split, words_out_for_snap)
         keeps_a, keeps_b = split_keeps_at_output_time(edl0.keeps, t_split)
         if not keeps_a or not keeps_b:
             print(f"[split_clip] point de scission invalide pour {clip_id} (t={t_split})")
