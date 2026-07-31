@@ -1618,6 +1618,17 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             # relance JAMAIS AssemblyAI, simple substitution de texte.
             words = _apply_lexicon(supabase, user_id, words)
 
+            # F6 (AUDIT.md) : persiste le transcript COMPLET de la source pour
+            # pouvoir rallonger un clip plus tard SANS re-transcrire (le
+            # calcul est déjà fait ici, une seule fois) — best-effort, ne
+            # bloque jamais la génération si la migration n'est pas appliquée.
+            try:
+                supabase.table("source_transcripts").upsert({
+                    "source_path": source_path, "words": words,
+                }).execute()
+            except Exception as exc:
+                print(f"[process_video] transcript complet non persisté (non bloquant) : {exc}")
+
             # Signaux objectifs (CPU) : rires, énergie, plans, visage.
             # N'échoue jamais le pipeline (renvoie des listes vides sinon).
             signals = extract_signals(local_video)
@@ -2169,6 +2180,207 @@ def _rerender_from_edl(edl_dict: dict, edl_words: list, resolution: str,
         raise RuntimeError(f"re-rendu échoué : {result.stderr[-500:]}")
 
 
+# =====================================================================
+# F6 (AUDIT.md) : opérations sur le clip lui-même — dupliquer, scinder,
+# rallonger. Aucune ne débite de minute (même invariant que les retouches
+# EDL : reserve_minutes/commit_reservations n'apparaissent JAMAIS ici).
+# =====================================================================
+
+@app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=300)
+def duplicate_clip(user_id: str, clip_id: str):
+    """Duplique un clip EN L'ÉTAT (même rendu, même EDL) pour servir de point
+    de départ à une variante indépendante — ex. « le même, mais plus court »
+    ensuite retouché séparément. Ne relance AUCUN rendu FFmpeg : copie
+    directement le fichier déjà rendu (rapide, gratuit)."""
+    supabase = get_supabase_client()
+    row = supabase.table("clips").select("*").eq("id", clip_id).maybe_single().execute().data
+    if not row or row.get("user_id") != user_id:
+        print(f"[duplicate_clip] clip {clip_id} introuvable / non éligible")
+        return
+    try:
+        data = supabase.storage.from_(CLIPS_BUCKET).download(row["storage_path"])
+        new_storage_path = f"{user_id}/dup_{clip_id}_{int(time.time())}.mp4"
+        supabase.storage.from_(CLIPS_BUCKET).upload(
+            new_storage_path, data, {"content-type": "video/mp4", "upsert": "true"}
+        )
+        new_row = {
+            "user_id": user_id, "source_path": row.get("source_path"),
+            "storage_path": new_storage_path,
+            "title": f"{row.get('title') or 'Extrait'} (copie)",
+            "score": row.get("score"), "reason": row.get("reason"),
+            "start_time": row.get("start_time"), "end_time": row.get("end_time"),
+            "caption": row.get("caption"), "hashtags": row.get("hashtags"),
+            "edl": row.get("edl"), "edl_words": row.get("edl_words"),
+            "edl_resolution": row.get("edl_resolution"),
+        }
+        _insert_clips_resilient(supabase, [new_row])
+        print(f"[duplicate_clip] clip {clip_id} dupliqué -> {new_storage_path}")
+    except Exception as exc:
+        print(f"[duplicate_clip] échec pour {clip_id} : {exc}")
+
+
+@app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=1200)
+def split_clip(user_id: str, clip_id: str, at_seconds: float | None = None):
+    """Scinde un clip en DEUX clips indépendants (par défaut à la moitié de
+    sa durée de sortie), chacun réellement re-rendu (le point de coupure
+    change ce qui doit apparaître dans chaque moitié). Le clip d'origine
+    n'est jamais modifié ni supprimé."""
+    from sortclip import EDL, map_words_to_output, build_ass, render as edl_render, validate
+    from sortclip.edl import Canvas
+    from sortclip.clipops import split_keeps_at_output_time, split_events_at_output_time
+
+    supabase = get_supabase_client()
+    row = supabase.table("clips").select("*").eq("id", clip_id).maybe_single().execute().data
+    if not row or row.get("user_id") != user_id or not row.get("edl"):
+        print(f"[split_clip] clip {clip_id} introuvable / non éligible")
+        return
+    try:
+        edl0 = EDL.model_validate(row["edl"])
+        t_split = at_seconds if at_seconds and 0 < at_seconds < edl0.out_duration else edl0.out_duration / 2
+        keeps_a, keeps_b = split_keeps_at_output_time(edl0.keeps, t_split)
+        if not keeps_a or not keeps_b:
+            print(f"[split_clip] point de scission invalide pour {clip_id} (t={t_split})")
+            return
+        events_a, events_b = split_events_at_output_time(edl0.events, t_split)
+        src_split = keeps_a[-1].end
+        edl_words = row.get("edl_words") or []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_local = os.path.join(tmp, "source.mp4")
+            data = supabase.storage.from_(SOURCE_BUCKET).download(row["source_path"])
+            Path(src_local).write_bytes(data)
+
+            from sortclip.compile import probe_source
+            try:
+                sw, sh = probe_source(src_local)
+            except Exception:
+                sw, sh = edl0.source.width, edl0.source.height
+
+            new_rows = []
+            parts = [
+                ("a", keeps_a, events_a, "partie 1/2", row.get("start_time"), src_split),
+                ("b", keeps_b, events_b, "partie 2/2", src_split, row.get("end_time")),
+            ]
+            for suffix, keeps, events, label, part_start, part_end in parts:
+                edl_part = edl0.model_copy(update={
+                    "source": edl0.source.model_copy(update={"path": src_local, "width": sw, "height": sh}),
+                    "keeps": keeps, "events": events,
+                })
+                edl_part, _ = validate(edl_part, word_count=len(edl_words))
+                words_out = map_words_to_output(edl_words, edl_part)
+                ass_path = os.path.join(tmp, f"split_{suffix}.ass")
+                out_path = os.path.join(tmp, f"split_{suffix}.mp4")
+                build_ass(words_out, edl_part.captions, edl_part.canvas, ass_path)
+                result = edl_render(edl_part, out_path, ass_path=ass_path, words_out=words_out)
+                if result.returncode != 0:
+                    print(f"[split_clip] rendu {label} échoué : {result.stderr[-300:]}")
+                    continue
+                new_storage_path = f"{user_id}/split_{clip_id}_{suffix}_{int(time.time())}.mp4"
+                with open(out_path, "rb") as f:
+                    supabase.storage.from_(CLIPS_BUCKET).upload(
+                        new_storage_path, f, {"content-type": "video/mp4", "upsert": "true"}
+                    )
+                new_rows.append({
+                    "user_id": user_id, "source_path": row.get("source_path"),
+                    "storage_path": new_storage_path,
+                    "title": f"{row.get('title') or 'Extrait'} ({label})",
+                    "score": row.get("score"), "reason": row.get("reason"),
+                    "start_time": part_start, "end_time": part_end,
+                    "caption": row.get("caption"), "hashtags": row.get("hashtags"),
+                    "edl": edl_part.model_dump(mode="json"), "edl_words": edl_words,
+                    "edl_resolution": row.get("edl_resolution"),
+                })
+            if new_rows:
+                _insert_clips_resilient(supabase, new_rows)
+                print(f"[split_clip] clip {clip_id} scindé en {len(new_rows)} partie(s)")
+    except Exception as exc:
+        print(f"[split_clip] échec pour {clip_id} : {exc}")
+
+
+@app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=1200)
+def extend_clip(user_id: str, clip_id: str, before_seconds: float = 0.0, after_seconds: float = 0.0):
+    """Rallonge un clip en reprenant de la matière déjà transcrite dans la
+    source (source_transcripts, F6 de l'audit) — AUCUNE re-transcription.
+    Crée un NOUVEAU clip (l'original reste intact) ; échoue proprement
+    (journalisé, sans lever) si le transcript complet n'a pas été persisté
+    pour cette source (clips générés avant ce correctif)."""
+    supabase = get_supabase_client()
+    row = supabase.table("clips").select("*").eq("id", clip_id).maybe_single().execute().data
+    if not row or row.get("user_id") != user_id:
+        print(f"[extend_clip] clip {clip_id} introuvable / non éligible")
+        return
+    transcript_row = (
+        supabase.table("source_transcripts").select("words")
+        .eq("source_path", row.get("source_path")).maybe_single().execute().data
+    )
+    if not transcript_row or not transcript_row.get("words"):
+        print(f"[extend_clip] transcript complet indisponible pour "
+              f"{row.get('source_path')} — régénère la vidéo pour activer cette "
+              f"fonctionnalité sur ce clip (impossible sans re-transcrire, ce "
+              f"qu'une retouche ne doit jamais faire).")
+        return
+    full_words = transcript_row["words"]
+    try:
+        plan = get_user_plan(supabase, user_id)
+        watermark = pricing.PLANS.get(plan, pricing.PLANS["free"])["watermark"]
+        resolution = PLAN_MAX_RESOLUTION.get(plan, "1080p")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_local = os.path.join(tmp, "source.mp4")
+            data = supabase.storage.from_(SOURCE_BUCKET).download(row["source_path"])
+            Path(src_local).write_bytes(data)
+            duration = get_video_duration(src_local)
+
+            new_start = max(0.0, float(row.get("start_time") or 0) - max(0.0, before_seconds))
+            new_end = min(duration, float(row.get("end_time") or duration) + max(0.0, after_seconds))
+            if new_end - new_start > MAX_CLIP_SECONDS:
+                overflow = (new_end - new_start) - MAX_CLIP_SECONDS
+                new_end -= overflow / 2
+                new_start += overflow / 2
+            if new_end <= new_start:
+                print(f"[extend_clip] plage étendue invalide pour {clip_id}")
+                return
+
+            clip_words = words_in_range(full_words, new_start, new_end)
+            if not clip_words:
+                print(f"[extend_clip] aucun mot dans la plage étendue pour {clip_id}")
+                return
+
+            # Style par défaut (le style d'origine — couleur/taille/position —
+            # n'est pas trivialement re-dérivable depuis l'EDL stocké) :
+            # l'utilisateur peut le retoucher ensuite comme n'importe quel clip.
+            style = resolve_subtitle_style(None)
+            out_path = os.path.join(tmp, "extended.mp4")
+            clip_dict = {
+                "start": new_start, "end": new_end,
+                "title": row.get("title") or "Extrait",
+                "score": row.get("score") or 60, "reason": row.get("reason") or "",
+            }
+            clip_edl, clip_edl_words = render_clip_edl(
+                src_local, clip_dict, full_words, style, resolution, out_path,
+                source_duration=duration, src_wh=None, watermark=watermark, tmp=tmp,
+            )
+            new_storage_path = f"{user_id}/extended_{clip_id}_{int(time.time())}.mp4"
+            with open(out_path, "rb") as f:
+                supabase.storage.from_(CLIPS_BUCKET).upload(
+                    new_storage_path, f, {"content-type": "video/mp4", "upsert": "true"}
+                )
+            new_row = {
+                "user_id": user_id, "source_path": row.get("source_path"),
+                "storage_path": new_storage_path,
+                "title": f"{row.get('title') or 'Extrait'} (rallongé)",
+                "score": row.get("score"), "reason": row.get("reason"),
+                "start_time": new_start, "end_time": new_end,
+                "caption": row.get("caption"), "hashtags": row.get("hashtags"),
+                "edl": clip_edl.model_dump(mode="json") if clip_edl else None,
+                "edl_words": clip_edl_words, "edl_resolution": resolution,
+            }
+            _insert_clips_resilient(supabase, [new_row])
+            print(f"[extend_clip] clip {clip_id} rallongé -> {new_storage_path}")
+    except Exception as exc:
+        print(f"[extend_clip] échec pour {clip_id} : {exc}")
+
+
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=1200)
 def rerender_clip(user_id: str, clip_id: str):
     """Re-génère la vidéo d'un clip depuis son EDL (après ajustement), la
@@ -2230,18 +2442,53 @@ def adjust():
             user_id, _email = auth_result
 
             clip_id = payload.get("clipId")
+            if not clip_id:
+                return JSONResponse({"error": "clipId requis"}, status_code=400)
+            supabase = get_supabase_client()
+
+            # F6 (AUDIT.md) : opérations sur le clip lui-même (pas sur son
+            # EDL) — dupliquer, scinder, rallonger. Chemin séparé, plus
+            # léger : pas besoin de charger l'EDL ici, les fonctions spawnées
+            # font leur propre lecture. Aucune ne débite de minute.
+            action = payload.get("action")
+            if action in ("duplicate", "split", "extend"):
+                owner_row = supabase.table("clips").select("user_id").eq("id", clip_id).maybe_single().execute().data
+                if not owner_row or owner_row.get("user_id") != user_id:
+                    return JSONResponse({"error": "Clip introuvable"}, status_code=404)
+                if action == "duplicate":
+                    duplicate_clip.spawn(user_id=user_id, clip_id=clip_id)
+                elif action == "split":
+                    at_seconds = payload.get("atSeconds")
+                    try:
+                        at_seconds = float(at_seconds) if at_seconds is not None else None
+                    except (TypeError, ValueError):
+                        at_seconds = None
+                    split_clip.spawn(user_id=user_id, clip_id=clip_id, at_seconds=at_seconds)
+                else:  # extend
+                    try:
+                        before_seconds = float(payload.get("beforeSeconds") or 0)
+                        after_seconds = float(payload.get("afterSeconds") or 0)
+                    except (TypeError, ValueError):
+                        before_seconds = after_seconds = 0.0
+                    if before_seconds <= 0 and after_seconds <= 0:
+                        return JSONResponse(
+                            {"error": "Précise au moins un nombre de secondes (avant ou après) à ajouter."},
+                            status_code=400,
+                        )
+                    extend_clip.spawn(user_id=user_id, clip_id=clip_id,
+                                      before_seconds=before_seconds, after_seconds=after_seconds)
+                return {"status": "processing", "action": action}
+
             instruction = (payload.get("instruction") or "").strip()
             edited_events = payload.get("events")            # édition visuelle (timeline)
             revert_to = payload.get("revertToVersion")        # A4 : retour à une version antérieure
             word_corrections = payload.get("wordCorrections")  # A7 : correction de sous-titres au mot
-            if not clip_id or (not instruction and edited_events is None
-                               and revert_to is None and word_corrections is None):
+            if not instruction and edited_events is None and revert_to is None and word_corrections is None:
                 return JSONResponse(
-                    {"error": "clipId et (instruction, events, revertToVersion ou wordCorrections) requis"},
+                    {"error": "instruction, events, revertToVersion, wordCorrections ou action requis"},
                     status_code=400,
                 )
 
-            supabase = get_supabase_client()
             row = (
                 supabase.table("clips").select("edl,edl_words,edl_resolution,user_id,edl_rev,source_path")
                 .eq("id", clip_id).maybe_single().execute().data
@@ -2340,7 +2587,7 @@ def adjust():
                 edl2 = edl.model_copy(update={"events": new_events})
                 notes = [f"{len(new_events)} événement(s) enregistré(s)"]
             else:
-                edl2, notes = apply_text_adjustment(edl, instruction)
+                edl2, notes = apply_text_adjustment(edl, instruction, words=row.get("edl_words"))
                 # Repli LLM si la consigne n'a pas été comprise par le déterministe.
                 if any("non reconnue" in n for n in notes):
                     try:

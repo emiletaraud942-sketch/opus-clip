@@ -27,12 +27,14 @@ from .validate import validate, Issue
 from .store import EDLStore
 from .patch import PatchOp, PatchResult, apply_patch, apply_text_adjustment
 from .semantic import extend_to_sentence_boundaries, looks_like_sentence_start, looks_like_sentence_end
+from .clipops import split_keeps_at_output_time, split_events_at_output_time
 from . import director
 
 __all__ = [
     "validate", "Issue", "EDLStore",
     "PatchOp", "PatchResult", "apply_patch", "apply_text_adjustment", "director",
     "extend_to_sentence_boundaries", "looks_like_sentence_start", "looks_like_sentence_end",
+    "split_keeps_at_output_time", "split_events_at_output_time",
     "EDL", "Interval", "Canvas", "Source", "Background", "Captions", "Watermark",
     "FramingEvent", "EmphasisEvent", "HoldOnSpeakerEvent", "SpeedEvent", "TextOverlayEvent",
     "Framing", "Transition", "FRAMING_ZOOM", "new_id",

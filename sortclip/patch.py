@@ -143,11 +143,48 @@ def _extract_overlay_text_and_position(instruction: str) -> tuple[str | None, st
     return (stripped or None), position
 
 
-def apply_text_adjustment(edl: EDL, instruction: str) -> tuple[EDL, list[str]]:
+def _normalize_word(w: str) -> str:
+    return (w or "").strip().strip(".,!?…:;»«\"'").lower()
+
+
+def _find_word_index(words: list[dict], target: str) -> int | None:
+    """Cherche `target` (mot ou courte expression) dans `words` (temps
+    SOURCE, transcript nettoyé) — comparaison insensible à la casse et à la
+    ponctuation. Renvoie l'index du PREMIER mot correspondant, ou None."""
+    target_norm = _normalize_word(target)
+    if not target_norm:
+        return None
+    for i, w in enumerate(words):
+        if _normalize_word(w.get("word", "")) == target_norm:
+            return i
+    return None
+
+
+_QUOTED_OR_LAST_WORD_RE = re.compile(r"[\"“‘'«](.+?)[\"”’'»]")
+
+
+def _extract_target_word(instruction: str) -> str | None:
+    """Extrait le mot/l'expression cible d'une consigne d'emphase — priorité
+    au texte entre guillemets, sinon le dernier mot de la phrase (couvre
+    « mets en valeur le mot X », « surligne X »)."""
+    quoted = _QUOTED_OR_LAST_WORD_RE.search(instruction)
+    if quoted:
+        return quoted.group(1).strip() or None
+    words = re.findall(r"[\wÀ-ÿ'-]+", instruction)
+    return words[-1] if words else None
+
+
+def apply_text_adjustment(edl: EDL, instruction: str,
+                          words: list[dict] | None = None) -> tuple[EDL, list[str]]:
     """Traduit une consigne FR en patchs déterministes. Retourne (EDL, notes).
     Ne touche QUE ce que la consigne vise. Renvoie une note par ajustement (ou
     une note « non compris » si rien ne correspond — au caller de basculer sur
-    le réalisateur LLM)."""
+    le réalisateur LLM).
+
+    `words` : transcript nettoyé en TEMPS SOURCE (mêmes mots que `edl_words`
+    stocké avec le clip) — nécessaire UNIQUEMENT pour les consignes de mise
+    en valeur d'un mot précis (recherche du mot + conversion en temps de
+    sortie). Sans ce paramètre, ces consignes tombent en repli LLM."""
     s = (instruction or "").lower()
     notes: list[str] = []
     edl2 = edl
@@ -298,6 +335,77 @@ def apply_text_adjustment(edl: EDL, instruction: str) -> tuple[EDL, list[str]]:
         edl2 = edl2.model_copy(update={"background": edl2.background.model_copy(
             update={"sigma": max(0, edl2.background.sigma - 10)})})
         notes.append("fond moins flou")
+
+    # --- Fond en couleur unie (F5) ---
+    if "fond" in s and ("couleur unie" in s or "couleur uni" in s or "fond noir" in s):
+        color = "#000000" if "noir" in s else edl2.background.color
+        edl2 = edl2.model_copy(update={"background": edl2.background.model_copy(
+            update={"mode": "solid", "color": color})})
+        notes.append(f"fond en couleur unie ({color})")
+
+    # --- Plein cadre, sans fond (bandes noires plutôt que flou) (F5) ---
+    if ("plein cadre" in s or "sans fond" in s or "retire le fond" in s
+            or "enlève le fond" in s or "pas de fond" in s):
+        edl2 = edl2.model_copy(update={"background": edl2.background.model_copy(update={"mode": "none"})})
+        notes.append("plein cadre (sans fond, bandes noires)")
+
+    # --- Sous-titres : activer/désactiver complètement (F4) ---
+    if "retire les sous-titres" in s or "enlève les sous-titres" in s or "sans sous-titres" in s or "désactive les sous-titres" in s or "desactive les sous-titres" in s:
+        edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"enabled": False})})
+        notes.append("sous-titres désactivés")
+    elif "remets les sous-titres" in s or "réactive les sous-titres" in s or "reactive les sous-titres" in s or "affiche les sous-titres" in s:
+        edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"enabled": True})})
+        notes.append("sous-titres réactivés")
+
+    # --- Figer le cadrage (F3) : un seul plan fixe sur tout le clip, au
+    # niveau de cadrage DOMINANT déjà présent (pas un niveau imposé comme
+    # « plan large »/« resserre ») — répond à « arrête de changer de plan,
+    # garde celui-là ». Distinct de "plan large"/"resserre" ci-dessus.
+    if "fige le cadrage" in s or "garde un seul cadrage" in s or "arrête de zoomer" in s or "arrete de zoomer" in s or "un seul plan" in s:
+        framings = [e for e in edl2.events if e.op == "framing"]
+        if framings:
+            counts: dict[str, int] = {}
+            for f in framings:
+                counts[f.value] = counts.get(f.value, 0) + 1
+            dominant = max(counts, key=counts.get)
+        else:
+            dominant = "medium"
+        new_events = [e for e in edl2.events if e.op != "framing"]
+        from .edl import FramingEvent
+        new_events.append(FramingEvent(t=0.0, value=dominant, transition="cut"))
+        edl2 = edl2.model_copy(update={"events": new_events})
+        notes.append(f"cadrage figé sur tout le clip ({dominant})")
+
+    # --- Mise en valeur d'un mot précis (F3/F8.2) ---
+    if (("mets en valeur" in s or "met en valeur" in s or "surligne" in s
+         or "mets l'emphase sur" in s or "met l'emphase sur" in s) and words):
+        target = _extract_target_word(instruction or "")
+        idx = _find_word_index(words, target) if target else None
+        if idx is not None:
+            from .captions import map_words_to_output
+            words_out = map_words_to_output(words, edl2)
+            if idx < len(words_out):
+                from .edl import EmphasisEvent
+                t_out = words_out[idx]["start"]
+                emphasis = EmphasisEvent(t=t_out, word_index=idx, style="pop")
+                edl2 = edl2.model_copy(update={"events": [*edl2.events, emphasis]})
+                notes.append(f"mise en valeur ajoutée sur « {words[idx]['word']} »")
+
+    # --- Retirer une mise en valeur précise, ou toutes (F3) ---
+    if (("retire la mise en valeur sur" in s or "enlève la mise en valeur sur" in s
+         or "retire l'emphase sur" in s or "enlève l'emphase sur" in s) and words):
+        target = _extract_target_word(instruction or "")
+        idx = _find_word_index(words, target) if target else None
+        if idx is not None:
+            new_events = [e for e in edl2.events if not (e.op == "emphasis" and e.word_index == idx)]
+            if len(new_events) < len(edl2.events):
+                edl2 = edl2.model_copy(update={"events": new_events})
+                notes.append(f"mise en valeur retirée sur « {words[idx]['word']} »")
+    elif "retire toutes les mises en valeur" in s or "aucune mise en valeur" in s or "sans mise en valeur" in s:
+        new_events = [e for e in edl2.events if e.op != "emphasis"]
+        if len(new_events) < len(edl2.events):
+            edl2 = edl2.model_copy(update={"events": new_events})
+            notes.append("toutes les mises en valeur retirées")
 
     if not notes:
         notes.append("consigne non reconnue par l'ajustement déterministe")
