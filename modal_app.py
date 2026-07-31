@@ -2354,6 +2354,29 @@ def adjust():
                     except Exception as exc:
                         print(f"[adjust] repli LLM indisponible : {exc}")
 
+            # Bug réel signalé : quand rien n'a été compris (consigne libre non
+            # reconnue par le déterministe NI par le repli LLM), l'ancien code
+            # créait quand même une nouvelle version et relançait un re-rendu
+            # — produisant une vidéo IDENTIQUE, mais avec edl_rev incrémenté :
+            # le front voyait "Clip mis à jour ✓" alors que rien n'avait changé.
+            # On compare l'EDL et les mots avant/après : si rien n'a changé,
+            # on le dit clairement plutôt que de faire semblant d'avoir réussi.
+            nothing_changed = (
+                edl2.model_dump(mode="json") == edl.model_dump(mode="json")
+                and final_edl_words == row.get("edl_words")
+            )
+            if nothing_changed:
+                return {
+                    "status": "not_understood",
+                    "notes": notes,
+                    "rev": row.get("edl_rev") or 0,
+                    "error": (
+                        "Consigne non comprise, aucun changement effectué. "
+                        "Essaie une des commandes proposées, ou reformule "
+                        "(ex. mets le texte à ajouter entre guillemets)."
+                    ),
+                }
+
             # A4 : historique versionné — chaque retouche (texte, timeline, ou
             # retour arrière) ajoute une NOUVELLE ligne, jamais une réécriture.
             # Best-effort : une migration non appliquée ne doit pas bloquer

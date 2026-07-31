@@ -258,6 +258,53 @@
         return `<div style="margin-top:8px;font-size:11px;color:${color};">⏳ Expire dans ${hoursLeft} h (plan gratuit : clips gardés 72 h)</div>`;
       }
 
+      // 20 commandes EXACTES, garanties reconnues par apply_text_adjustment
+      // (sortclip/patch.py) — chemin déterministe, sans LLM, gratuit, résultat
+      // immédiat. Toute autre formulation passe par le réalisateur IA (repli),
+      // plus lent et pas garanti de tout comprendre. Cette liste doit rester
+      // synchronisée avec les motifs réellement reconnus dans patch.py.
+      const EXACT_COMMANDS = [
+        { cat: 'Cadrage', label: 'Réduire les zooms', instruction: 'moins de zooms' },
+        { cat: 'Cadrage', label: 'Retirer tous les zooms', instruction: 'aucun zoom' },
+        { cat: 'Cadrage', label: 'Resserrer sur le locuteur (gros plan)', instruction: 'resserre sur le locuteur' },
+        { cat: 'Cadrage', label: 'Plan large sur tout le clip', instruction: 'plan large' },
+        { cat: 'Sous-titres', label: 'Agrandir les sous-titres', instruction: 'sous-titres plus gros' },
+        { cat: 'Sous-titres', label: 'Réduire les sous-titres', instruction: 'sous-titres plus petits' },
+        { cat: 'Sous-titres', label: 'Sous-titres en jaune', instruction: 'sous-titres en jaune' },
+        { cat: 'Sous-titres', label: 'Sous-titres en blanc', instruction: 'sous-titres en blanc' },
+        { cat: 'Sous-titres', label: 'Sous-titres en rose', instruction: 'sous-titres en rose' },
+        { cat: 'Sous-titres', label: 'Sous-titres en cyan', instruction: 'sous-titres en cyan' },
+        { cat: 'Sous-titres', label: 'Remonter les sous-titres', instruction: 'monte les sous-titres' },
+        { cat: 'Sous-titres', label: 'Descendre les sous-titres', instruction: 'descends les sous-titres' },
+        { cat: 'Sous-titres', label: 'Sous-titres en gras', instruction: 'sous-titres en gras' },
+        { cat: 'Sous-titres', label: 'Sous-titres sans gras', instruction: 'sous-titres pas gras' },
+        { cat: 'Sous-titres', label: 'Style karaoké (mot à mot)', instruction: 'style karaoké' },
+        { cat: 'Sous-titres', label: 'Style classique', instruction: 'sous-titres classiques' },
+        { cat: 'Montage', label: 'Couper le début (2s)', instruction: 'coupe le début' },
+        { cat: 'Montage', label: 'Couper la fin (2s)', instruction: 'coupe la fin' },
+        { cat: 'Fond', label: 'Fond plus flou', instruction: 'fond plus flou' },
+        { cat: 'Texte incrusté', label: 'Titre en haut (à personnaliser)', instruction: 'ajoute le titre "Ton texte ici" en haut' },
+      ];
+
+      function commandsPanelHtml() {
+        const byCat = {};
+        EXACT_COMMANDS.forEach(c => { (byCat[c.cat] = byCat[c.cat] || []).push(c); });
+        return Object.entries(byCat).map(([cat, items]) => `
+          <div style="margin-bottom:8px;">
+            <div style="font-size:10px;font-weight:800;color:#8b5cf6;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">${esc(cat)}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;">
+              ${items.map(it => `
+                <button type="button" data-fill-command="${esc(it.instruction)}"
+                  title="${esc(it.instruction)}"
+                  style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:600;padding:5px 10px;border-radius:9999px;cursor:pointer;">${esc(it.label)}</button>
+              `).join('')}
+            </div>
+          </div>
+        `).join('') + `
+          <div style="font-size:11px;color:#6b7280;margin-top:6px;">Clique une commande pour la mettre dans le champ (modifiable avant d'envoyer), puis « Ajuster ». Toute autre formulation passe par l'IA — plus lente, et pas garantie de tout comprendre.</div>
+        `;
+      }
+
       // A3 : jusqu'à 2 suggestions dérivées de l'état réel de l'EDL, plus une
       // toujours proposée. Chaque clic renvoie l'instruction EXACTE reconnue
       // par apply_text_adjustment (chemin déterministe, sans LLM, gratuit).
@@ -291,7 +338,20 @@
           });
           const data = await res.json().catch(() => ({}));
           if (!res.ok) { statusEl.style.color = '#fca5a5'; statusEl.textContent = data.error || 'Échec.'; triggerEl.disabled = false; return; }
+          // Bug corrigé : avant, une consigne non comprise déclenchait quand
+          // même un re-rendu (vidéo identique, edl_rev incrémenté quand même)
+          // -> le front affichait "Clip mis à jour ✓" pour RIEN. Le backend
+          // renvoie maintenant explicitement status="not_understood" : on
+          // l'affiche clairement en rouge, sans lancer le sondage de re-rendu
+          // (edl_rev n'incrémentera jamais, puisqu'aucun re-rendu n'a lieu).
+          if (data.status === 'not_understood') {
+            statusEl.style.color = '#fca5a5';
+            statusEl.textContent = '⚠ ' + (data.error || 'Consigne non comprise.');
+            triggerEl.disabled = false;
+            return;
+          }
           const baseRev = data.rev ?? (Number(clipsById[clipId]?.edl_rev) || 0);
+          statusEl.style.color = '#9ca3af';
           statusEl.textContent = ((data.notes || []).join(' · ') || 'Ajustement') + ' — re-rendu en cours…';
           let tries = 0;
           const poll = setInterval(async () => {
@@ -485,6 +545,8 @@
                 style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">🕘 Historique</button>
               <button data-subtitles="${c.id}"
                 style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">✍️ Sous-titres</button>
+              <button data-commands="${c.id}"
+                style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">📋 Commandes</button>
               <span data-adjust-status="${c.id}" style="font-size:11px;color:#9ca3af;"></span>
             </div>
             <!-- A1 : compteur de retouches gratuites de CE clip, en permanence -->
@@ -495,6 +557,8 @@
             <div data-history-panel="${c.id}" style="display:none;margin-top:10px;background:#17171d;border:1px solid #2a2a35;border-radius:8px;padding:8px;max-height:220px;overflow-y:auto;"></div>
             <!-- A7 : panneau de correction des sous-titres au mot, replié par défaut -->
             <div data-subtitles-panel="${c.id}" style="display:none;margin-top:10px;background:#17171d;border:1px solid #2a2a35;border-radius:8px;padding:10px;"></div>
+            <!-- 20 commandes exactes garanties reconnues, replié par défaut -->
+            <div data-commands-panel="${c.id}" style="display:none;margin-top:10px;background:#17171d;border:1px solid #2a2a35;border-radius:8px;padding:10px;"></div>
             <div data-editor="${c.id}" style="display:none;margin-top:10px;"></div>
           </div>` : ''}
         </div>`;
@@ -642,6 +706,35 @@
             renderSubtitlesPanel(clipId, panel);
           } else {
             panel.style.display = 'none';
+          }
+          return;
+        }
+
+        // 20 commandes exactes : ouvrir/fermer le panneau de référence.
+        const commandsBtn = e.target.closest('[data-commands]');
+        if (commandsBtn) {
+          const clipId = commandsBtn.getAttribute('data-commands');
+          const panel = grid.querySelector(`[data-commands-panel="${clipId}"]`);
+          if (panel.style.display === 'none') {
+            panel.style.display = 'block';
+            panel.innerHTML = commandsPanelHtml();
+          } else {
+            panel.style.display = 'none';
+          }
+          return;
+        }
+
+        // 20 commandes exactes : un clic remplit le champ (pas d'envoi
+        // automatique — certaines commandes, comme le titre incrusté,
+        // doivent être personnalisées avant d'être envoyées).
+        const fillBtn = e.target.closest('[data-fill-command]');
+        if (fillBtn) {
+          const panelEl = fillBtn.closest('[data-commands-panel]');
+          const clipId = panelEl ? panelEl.getAttribute('data-commands-panel') : null;
+          const input = clipId ? grid.querySelector(`[data-adjust-input="${clipId}"]`) : null;
+          if (input) {
+            input.value = fillBtn.getAttribute('data-fill-command');
+            input.focus();
           }
           return;
         }
