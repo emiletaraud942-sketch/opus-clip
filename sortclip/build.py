@@ -67,6 +67,7 @@ def build_edl(
     watermark: bool = False,
     source_width: int | None = None,
     source_height: int | None = None,
+    source_face_x: float | None = None,
 ) -> tuple[EDL, list[dict]]:
     """Construit un EDL prêt à compiler à partir d'un transcript et d'un preset.
 
@@ -87,7 +88,8 @@ def build_edl(
     edl = EDL(
         preset=preset.get("label"),
         source=Source(path=source_path, duration=source_duration,
-                      width=source_width, height=source_height),
+                      width=source_width, height=source_height,
+                      face_x=source_face_x),
         keeps=keeps,
         background=Background(**preset.get("background", {})),
         captions=Captions(**preset.get("captions", {})),

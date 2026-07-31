@@ -340,15 +340,15 @@ def build_filter_complex(edl: EDL, ass_path: str | None = None,
     spans = edl.framing_spans()
     if len(spans) == 1:
         z = FRAMING_ZOOM[spans[0][2]]
-        parts.append(f"[fgsrc]{_crop_scale(z, fw, fh)}[fg]")
+        parts.append(f"[fgsrc]{_crop_scale(z, fw, fh, spans[0][3])}[fg]")
     else:
         labels = "".join(f"[fs{i}]" for i in range(len(spans)))
         parts.append(f"[fgsrc]split={len(spans)}{labels}")
-        for i, (t0, t1, value) in enumerate(spans):
+        for i, (t0, t1, value, face_x) in enumerate(spans):
             z = FRAMING_ZOOM[value]
             parts.append(
                 f"[fs{i}]trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,"
-                f"{_crop_scale(z, fw, fh)}[fc{i}]"
+                f"{_crop_scale(z, fw, fh, face_x)}[fc{i}]"
             )
         chain = "".join(f"[fc{i}]" for i in range(len(spans)))
         parts.append(f"{chain}concat=n={len(spans)}:v=1:a=0[fg]")
@@ -475,13 +475,22 @@ def foreground_size(edl: EDL) -> tuple[int, int]:
     return w, h
 
 
-def _crop_scale(zoom: float, w: int, h: int) -> str:
-    """setsar=1 est obligatoire : concat compare aussi les ratios de pixel."""
-    crop = (
-        ""
-        if zoom >= 0.999
-        else f"crop=w='2*floor(iw*{zoom:.4f}/2)':h='2*floor(ih*{zoom:.4f}/2)',"
-    )
+def _crop_scale(zoom: float, w: int, h: int, face_x: float = 0.5) -> str:
+    """setsar=1 est obligatoire : concat compare aussi les ratios de pixel.
+
+    A1 (AUDIT.md) : `face_x` (0=bord gauche, 0.5=centre, 1=bord droit) décale
+    le crop horizontalement pour garder le visage détecté dans le cadre au
+    lieu de toujours centrer géométriquement. `face_x=0.5` reproduit
+    EXACTEMENT l'ancien calcul par défaut de `crop` (clamp garantit qu'on ne
+    sort jamais de l'image), donc aucun changement de comportement pour les
+    EDL existants ou les cadrages sans visage détecté.
+    """
+    if zoom >= 0.999:
+        return f"scale={w}:{h}:flags=lanczos,setsar=1"
+    cropw = f"2*floor(iw*{zoom:.4f}/2)"
+    croph = f"2*floor(ih*{zoom:.4f}/2)"
+    x_expr = f"clamp(iw*{face_x:.4f}-({cropw})/2,0,iw-({cropw}))"
+    crop = f"crop=w='{cropw}':h='{croph}':x='{x_expr}':y='(ih-({croph}))/2',"
     return f"{crop}scale={w}:{h}:flags=lanczos,setsar=1"
 
 

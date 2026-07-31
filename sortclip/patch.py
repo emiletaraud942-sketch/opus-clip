@@ -235,16 +235,20 @@ def apply_text_adjustment(edl: EDL, instruction: str,
     # --- Resserrer sur le locuteur (bouton A3, cadrage large sur tout le clip) ---
     if "resserr" in s or "recadre sur le locuteur" in s or "recadrer sur le locuteur" in s:
         framings = [e for e in edl2.events if e.op == "framing"]
+        # A1 (AUDIT.md) : centre le crop sur le visage détecté à la
+        # génération, au lieu de toujours centrer géométriquement. Retombe sur
+        # 0.5 (centré, comportement historique) si aucun visage fiable.
+        face_x = edl2.source.face_x if edl2.source.face_x is not None else 0.5
         if framings:
             new_events = [
-                e.model_copy(update={"value": "tight"}) if e.op == "framing" else e
+                e.model_copy(update={"value": "tight", "face_x": face_x}) if e.op == "framing" else e
                 for e in edl2.events
             ]
             edl2 = edl2.model_copy(update={"events": new_events})
             notes.append("cadrage resserré sur tout le clip")
         else:
             from .edl import FramingEvent
-            tight = FramingEvent(t=0.0, value="tight", transition="cut")
+            tight = FramingEvent(t=0.0, value="tight", transition="cut", face_x=face_x)
             edl2 = edl2.model_copy(update={"events": [*edl2.events, tight]})
             notes.append("cadrage resserré ajouté (gros plan)")
 
@@ -372,7 +376,8 @@ def apply_text_adjustment(edl: EDL, instruction: str,
             dominant = "medium"
         new_events = [e for e in edl2.events if e.op != "framing"]
         from .edl import FramingEvent
-        new_events.append(FramingEvent(t=0.0, value=dominant, transition="cut"))
+        face_x = edl2.source.face_x if edl2.source.face_x is not None else 0.5
+        new_events.append(FramingEvent(t=0.0, value=dominant, transition="cut", face_x=face_x))
         edl2 = edl2.model_copy(update={"events": new_events})
         notes.append(f"cadrage figé sur tout le clip ({dominant})")
 

@@ -62,6 +62,11 @@ class FramingEvent(BaseModel):
     # index arbitraire, et affiche la raison au survol dans l'interface.
     motivation: float = Field(default=0.5, ge=0.0, le=1.0)
     raison: str = ""
+    # A1 (AUDIT.md) : centre horizontal du crop (0=bord gauche, 0.5=centre,
+    # 1=bord droit). Défaut 0.5 = comportement historique (crop centré),
+    # donc rétro-compatible avec tout EDL déjà stocké. Posé depuis
+    # `Source.face_x` quand un visage a été détecté de façon fiable.
+    face_x: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class EmphasisEvent(BaseModel):
@@ -157,6 +162,13 @@ class Source(BaseModel):
     # dimensions ou des SAR hétérogènes.
     width: int | None = None
     height: int | None = None
+    # A1 (AUDIT.md) : position horizontale moyenne du visage détecté (0=bord
+    # gauche, 0.5=centre, 1=bord droit), calculée une fois à la génération par
+    # extract_signals() (modal_app.py). None si aucun visage fiable détecté —
+    # dans ce cas le crop reste centré (comportement historique). C'est une
+    # moyenne STATIQUE sur tout le clip : un locuteur qui se déplace ou un
+    # changement de locuteur ne sont PAS suivis dans le temps.
+    face_x: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 # --------------------------------------------------------------------------
@@ -191,26 +203,28 @@ class EDL(BaseModel):
     def event_by_id(self, event_id: str) -> Event | None:
         return next((e for e in self.events if e.id == event_id), None)
 
-    def framing_spans(self) -> list[tuple[float, float, str]]:
+    def framing_spans(self) -> list[tuple[float, float, str, float]]:
         """Découpe la timeline de sortie en segments à cadrage constant.
 
-        Retourne [(debut, fin, cadrage)]. C'est ce que consomme le compilateur :
-        un crop fixe par segment, puis concaténation. Plus robuste qu'une
-        expression FFmpeg variable dans le temps.
+        Retourne [(debut, fin, cadrage, face_x)]. C'est ce que consomme le
+        compilateur : un crop fixe par segment, puis concaténation. Plus
+        robuste qu'une expression FFmpeg variable dans le temps. `face_x`
+        (A1, AUDIT.md) permet au crop de rester centré sur le visage détecté
+        au lieu du centre géométrique de l'image.
         """
         marks = sorted(
             [e for e in self.events if e.op == "framing"], key=lambda e: e.t
         )
-        cuts: list[tuple[float, str]] = [(0.0, "wide")]
+        cuts: list[tuple[float, str, float]] = [(0.0, "wide", 0.5)]
         for e in marks:
             if e.t <= 0.0:
-                cuts[0] = (0.0, e.value)
+                cuts[0] = (0.0, e.value, e.face_x)
             else:
-                cuts.append((e.t, e.value))
+                cuts.append((e.t, e.value, e.face_x))
 
-        spans: list[tuple[float, float, str]] = []
-        for i, (t, value) in enumerate(cuts):
+        spans: list[tuple[float, float, str, float]] = []
+        for i, (t, value, face_x) in enumerate(cuts):
             end = cuts[i + 1][0] if i + 1 < len(cuts) else self.out_duration
             if end - t > 1e-3:
-                spans.append((t, end, value))
-        return spans or [(0.0, self.out_duration, "wide")]
+                spans.append((t, end, value, face_x))
+        return spans or [(0.0, self.out_duration, "wide", 0.5)]

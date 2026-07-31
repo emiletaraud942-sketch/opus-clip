@@ -642,6 +642,7 @@ def extract_signals(video_path: str) -> dict:
     pipeline : en cas d'erreur, renvoie des listes vides."""
     signals = {
         "energy_peaks": [], "laughter": [], "shot_changes": [], "face_ratio": None,
+        "face_x": None,
         "rms_times": [], "rms_z": [],
     }
 
@@ -724,14 +725,21 @@ def extract_signals(video_path: str) -> dict:
         sampled = 0
         with_face = 0
         idx = 0
+        face_x_samples = []  # A1 (AUDIT.md) : centre x normalisé du plus grand visage par image
         while sampled < 60:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, frame = cap.read()
             if not ok:
                 break
+            frame_w = frame.shape[1] or 1
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            if len(detector.detectMultiScale(gray, 1.1, 5)):
+            faces = detector.detectMultiScale(gray, 1.1, 5)
+            if len(faces):
                 with_face += 1
+                # Le plus grand visage détecté (le plus proche caméra = probablement
+                # le locuteur principal). Ne distingue PAS plusieurs locuteurs.
+                fx, fy, fw2, fh2 = max(faces, key=lambda f: f[2] * f[3])
+                face_x_samples.append((fx + fw2 / 2) / frame_w)
             sampled += 1
             idx += step
             if total and idx >= total:
@@ -739,6 +747,14 @@ def extract_signals(video_path: str) -> dict:
         cap.release()
         if sampled:
             signals["face_ratio"] = round(with_face / sampled, 2)
+        # N'expose une position que si le visage est réellement présent la
+        # majorité du temps échantillonné — sinon la médiane n'est pas
+        # représentative (ex: visage absent 90% du clip, quelques faux
+        # positifs). Moyenne STATIQUE : un locuteur qui se déplace pendant le
+        # clip n'est pas suivi image par image.
+        if len(face_x_samples) >= 3 and len(face_x_samples) >= 0.5 * sampled:
+            face_x_samples.sort()
+            signals["face_x"] = round(face_x_samples[len(face_x_samples) // 2], 3)
     except Exception as exc:
         print(f"[extract_signals] visages ignorés: {exc}")
 
@@ -1339,6 +1355,7 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
         source_path=source_path, source_duration=source_duration,
         words=clip_words, preset_name=preset_name, watermark=watermark,
         source_width=sw, source_height=sh,
+        source_face_x=(signals or {}).get("face_x"),
     )
 
     width, height = OUTPUT_RESOLUTIONS[resolution]
@@ -1384,6 +1401,16 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
             client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
             events = director.direct(client, words_out, annotated_transcript=annotated)
             if events:
+                # A1 (AUDIT.md) : le réalisateur LLM ne connaît pas la position
+                # du visage — on la reporte ici depuis le visage détecté par
+                # extract_signals() sur TOUS les cadrages (sans effet sur
+                # "wide", qui ne recadre pas).
+                face_x = edl.source.face_x
+                if face_x is not None:
+                    events = [
+                        e.model_copy(update={"face_x": face_x}) if e.op == "framing" else e
+                        for e in events
+                    ]
                 edl = edl.model_copy(update={"events": events})
         except Exception as exc:
             print(f"[render_clip_edl] réalisateur ignoré : {exc}")
