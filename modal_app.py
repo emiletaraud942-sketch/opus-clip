@@ -2735,6 +2735,18 @@ def adjust():
                     supabase.table("clip_versions").select("version")
                     .eq("clip_id", clip_id).order("version", desc=True).limit(1).execute().data
                 )
+                # Bug réel trouvé en vérifiant le fonctionnement de l'historique :
+                # seul l'état APRÈS chaque retouche était versionné -> l'état
+                # ORIGINAL (avant toute retouche) n'était jamais sauvegardé et
+                # devenait irrécupérable dès la première retouche (`clips.edl`
+                # écrasé juste après). On snapshotte donc l'original en version 0
+                # la toute première fois qu'un clip est ajusté.
+                if not existing:
+                    supabase.table("clip_versions").insert({
+                        "clip_id": clip_id, "version": 0, "note": "Version d'origine",
+                        "edl": row["edl"], "edl_words": row.get("edl_words"),
+                        "edl_resolution": row.get("edl_resolution"),
+                    }).execute()
                 next_version = (existing[0]["version"] if existing else 0) + 1
                 version_note = instruction if instruction else (notes[0] if notes else "Ajustement")
                 supabase.table("clip_versions").insert({
