@@ -1334,7 +1334,8 @@ _EDL_Y = {"bas": 0.80, "milieu": 0.50, "haut": 0.16}
 def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
                     resolution: str, out_path: str, source_duration: float,
                     src_wh: tuple[int, int] | None, watermark: bool, tmp: str,
-                    signals: dict | None = None):
+                    signals: dict | None = None,
+                    override_captions=None, override_background=None):
     """Rendu d'un clip via le MOTEUR EDL (sortclip). Construit un EDL déclaratif
     pour le segment, en applique le preset (viral -> « rythme », sinon
     « podcast_dynamique ») et les réglages de sous-titres choisis par l'utilisateur,
@@ -1359,15 +1360,27 @@ def render_clip_edl(source_path: str, clip: dict, words: list, style: dict,
     )
 
     width, height = OUTPUT_RESOLUTIONS[resolution]
-    cap = edl.captions.model_copy(update={
-        "primary": "#" + SUBTITLE_COLOR_PRESETS[style["textColor"]],
-        "size": _EDL_SIZE[style["size"]],
-        "y": _EDL_Y[style["position"]],
-        "style": "karaoke" if punchy else "plain",
-        "bold": bool(style.get("bold")),
-        "words_per_line": 2 if punchy else 4,
-    })
-    edl = edl.model_copy(update={"canvas": Canvas(w=width, h=height, fps=30), "captions": cap})
+    # G2 (prompt amélioration commandes) : quand on reconstruit un EDL pour un
+    # clip qui existait DÉJÀ (rallonge, F6 de l'audit), les réglages exacts du
+    # clip d'origine (couleur/taille/position EXACTES posées par une retouche,
+    # fond flou/solide/aucun) sont directement disponibles dans son EDL stocké
+    # — les écraser par le style par défaut (`DEFAULT_SUBTITLE_STYLE`) est une
+    # perte réelle et évitable, pas juste "pas trivialement re-dérivable".
+    if override_captions is not None:
+        cap = override_captions
+    else:
+        cap = edl.captions.model_copy(update={
+            "primary": "#" + SUBTITLE_COLOR_PRESETS[style["textColor"]],
+            "size": _EDL_SIZE[style["size"]],
+            "y": _EDL_Y[style["position"]],
+            "style": "karaoke" if punchy else "plain",
+            "bold": bool(style.get("bold")),
+            "words_per_line": 2 if punchy else 4,
+        })
+    canvas_update = {"canvas": Canvas(w=width, h=height, fps=30), "captions": cap}
+    if override_background is not None:
+        canvas_update["background"] = override_background
+    edl = edl.model_copy(update=canvas_update)
 
     # Mots en temps de SORTIE : servent au réalisateur (index de mots) ET aux
     # sous-titres.
@@ -2380,9 +2393,22 @@ def extend_clip(user_id: str, clip_id: str, before_seconds: float = 0.0, after_s
                 print(f"[extend_clip] aucun mot dans la plage étendue pour {clip_id}")
                 return
 
-            # Style par défaut (le style d'origine — couleur/taille/position —
-            # n'est pas trivialement re-dérivable depuis l'EDL stocké) :
-            # l'utilisateur peut le retoucher ensuite comme n'importe quel clip.
+            # G2 (prompt amélioration commandes) : le style d'origine (couleur/
+            # taille/position/karaoke des sous-titres, fond flou/solide/aucun)
+            # EST re-dérivable — il est déjà dans l'EDL stocké du clip. On le
+            # reporte tel quel sur le clip rallongé au lieu de repartir du
+            # style par défaut, qui effaçait silencieusement toute retouche
+            # déjà faite. `style` (quantizé) ne sert plus que de repli si
+            # l'EDL d'origine est illisible.
+            override_captions = override_background = None
+            try:
+                from sortclip import EDL as _EDL
+                original_edl = _EDL.model_validate(row["edl"]) if row.get("edl") else None
+                if original_edl is not None:
+                    override_captions = original_edl.captions
+                    override_background = original_edl.background
+            except Exception as exc:
+                print(f"[extend_clip] style d'origine illisible, repli par défaut : {exc}")
             style = resolve_subtitle_style(None)
             out_path = os.path.join(tmp, "extended.mp4")
             clip_dict = {
@@ -2393,6 +2419,7 @@ def extend_clip(user_id: str, clip_id: str, before_seconds: float = 0.0, after_s
             clip_edl, clip_edl_words = render_clip_edl(
                 src_local, clip_dict, full_words, style, resolution, out_path,
                 source_duration=duration, src_wh=None, watermark=watermark, tmp=tmp,
+                override_captions=override_captions, override_background=override_background,
             )
             new_storage_path = f"{user_id}/extended_{clip_id}_{int(time.time())}.mp4"
             with open(out_path, "rb") as f:
