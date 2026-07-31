@@ -258,16 +258,19 @@
         return `<div style="margin-top:8px;font-size:11px;color:${color};">⏳ Expire dans ${hoursLeft} h (plan gratuit : clips gardés 72 h)</div>`;
       }
 
-      // 20 commandes EXACTES, garanties reconnues par apply_text_adjustment
+      // Commandes EXACTES, garanties reconnues par apply_text_adjustment
       // (sortclip/patch.py) — chemin déterministe, sans LLM, gratuit, résultat
-      // immédiat. Toute autre formulation passe par le réalisateur IA (repli),
-      // plus lent et pas garanti de tout comprendre. Cette liste doit rester
-      // synchronisée avec les motifs réellement reconnus dans patch.py.
+      // immédiat. Un clic EXÉCUTE directement la commande (plus de champ de
+      // texte libre à remplir : celles qui ont besoin d'être personnalisées
+      // (titre, mot à mettre en valeur) demandent la valeur via une simple
+      // invite). Cette liste doit rester synchronisée avec les motifs
+      // réellement reconnus dans patch.py.
       const EXACT_COMMANDS = [
         { cat: 'Cadrage', label: 'Réduire les zooms', instruction: 'moins de zooms' },
         { cat: 'Cadrage', label: 'Retirer tous les zooms', instruction: 'aucun zoom' },
         { cat: 'Cadrage', label: 'Resserrer sur le locuteur (gros plan)', instruction: 'resserre sur le locuteur' },
         { cat: 'Cadrage', label: 'Plan large sur tout le clip', instruction: 'plan large' },
+        { cat: 'Cadrage', label: 'Figer sur un seul plan (arrête les changements)', instruction: 'fige le cadrage' },
         { cat: 'Sous-titres', label: 'Agrandir les sous-titres', instruction: 'sous-titres plus gros' },
         { cat: 'Sous-titres', label: 'Réduire les sous-titres', instruction: 'sous-titres plus petits' },
         { cat: 'Sous-titres', label: 'Sous-titres en jaune', instruction: 'sous-titres en jaune' },
@@ -280,52 +283,69 @@
         { cat: 'Sous-titres', label: 'Sous-titres sans gras', instruction: 'sous-titres pas gras' },
         { cat: 'Sous-titres', label: 'Style karaoké (mot à mot)', instruction: 'style karaoké' },
         { cat: 'Sous-titres', label: 'Style classique', instruction: 'sous-titres classiques' },
+        { cat: 'Sous-titres', label: 'Désactiver les sous-titres', instruction: 'retire les sous-titres' },
+        { cat: 'Sous-titres', label: 'Réactiver les sous-titres', instruction: 'remets les sous-titres' },
         { cat: 'Montage', label: 'Couper le début (2s)', instruction: 'coupe le début' },
         { cat: 'Montage', label: 'Couper la fin (2s)', instruction: 'coupe la fin' },
         { cat: 'Fond', label: 'Fond plus flou', instruction: 'fond plus flou' },
         { cat: 'Fond', label: 'Fond en couleur unie', instruction: 'mets un fond de couleur unie' },
         { cat: 'Fond', label: 'Plein cadre, sans fond', instruction: 'plein cadre sans fond' },
-        { cat: 'Texte incrusté', label: 'Titre en haut (à personnaliser)', instruction: 'ajoute le titre "Ton texte ici" en haut' },
-        { cat: 'Sous-titres', label: 'Désactiver les sous-titres', instruction: 'retire les sous-titres' },
-        { cat: 'Sous-titres', label: 'Réactiver les sous-titres', instruction: 'remets les sous-titres' },
-        { cat: 'Cadrage', label: 'Figer sur un seul plan (arrête les changements)', instruction: 'fige le cadrage' },
-        { cat: 'Emphase', label: 'Mettre un mot en valeur (à personnaliser)', instruction: 'mets en valeur "ton mot"' },
+        { cat: 'Texte incrusté', label: 'Ajouter un titre en haut',
+          instruction: 'ajoute le titre "{value}" en haut',
+          prompt: 'Texte du titre à incruster en haut du clip :' },
+        { cat: 'Emphase', label: 'Mettre un mot en valeur',
+          instruction: 'mets en valeur "{value}"',
+          prompt: 'Quel mot du clip mettre en valeur ?' },
         { cat: 'Emphase', label: 'Retirer toutes les mises en valeur', instruction: 'retire toutes les mises en valeur' },
       ];
 
-      function commandsPanelHtml() {
+      // Panneau UNIQUE : toutes les commandes EDL exécutables en un clic,
+      // PLUS les actions sur le clip lui-même (dupliquer/scinder/rallonger)
+      // et les panneaux avancés (timeline, historique, sous-titres au mot) —
+      // une seule catégorie d'accès (« 📋 Commandes ») au lieu de boutons
+      // dispersés. `c` : le clip concerné.
+      function commandsPanelHtml(c) {
         const byCat = {};
-        EXACT_COMMANDS.forEach(c => { (byCat[c.cat] = byCat[c.cat] || []).push(c); });
-        return Object.entries(byCat).map(([cat, items]) => `
+        EXACT_COMMANDS.forEach(cmd => { (byCat[cmd.cat] = byCat[cmd.cat] || []).push(cmd); });
+        const cmdGroups = Object.entries(byCat).map(([cat, items]) => `
           <div style="margin-bottom:8px;">
             <div style="font-size:10px;font-weight:800;color:#8b5cf6;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">${esc(cat)}</div>
             <div style="display:flex;flex-wrap:wrap;gap:6px;">
               ${items.map(it => `
-                <button type="button" data-fill-command="${esc(it.instruction)}"
-                  title="${esc(it.instruction)}"
+                <button type="button" data-run-command="${c.id}" data-instruction="${esc(it.instruction)}"
+                  ${it.prompt ? `data-prompt="${esc(it.prompt)}"` : ''}
                   style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:600;padding:5px 10px;border-radius:9999px;cursor:pointer;">${esc(it.label)}</button>
               `).join('')}
             </div>
           </div>
-        `).join('') + `
-          <div style="font-size:11px;color:#6b7280;margin-top:6px;">Clique une commande pour la mettre dans le champ (modifiable avant d'envoyer), puis « Ajuster ». Toute autre formulation passe par l'IA — plus lente, et pas garantie de tout comprendre.</div>
-        `;
-      }
+        `).join('');
 
-      // A3 : jusqu'à 2 suggestions dérivées de l'état réel de l'EDL, plus une
-      // toujours proposée. Chaque clic renvoie l'instruction EXACTE reconnue
-      // par apply_text_adjustment (chemin déterministe, sans LLM, gratuit).
-      function suggestButtons(c) {
-        const events = (c.edl && c.edl.events) || [];
-        const framings = events.filter(e => e.op === 'framing');
-        const suggestions = [];
-        if (framings.length >= 3) {
-          suggestions.push({ label: '✂️ Moins de zooms', instruction: 'moins de zooms' });
-        } else if (framings.length === 0 || framings.every(f => f.value === 'wide')) {
-          suggestions.push({ label: '🔍 Resserrer sur le locuteur', instruction: 'resserre sur le locuteur' });
-        }
-        suggestions.push({ label: '🔠 Sous-titres plus gros', instruction: 'sous-titres plus gros' });
-        return suggestions;
+        return `
+          ${cmdGroups}
+          <div style="margin-bottom:8px;">
+            <div style="font-size:10px;font-weight:800;color:#8b5cf6;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Clip</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;">
+              <button type="button" data-duplicate="${c.id}" title="Crée une copie indépendante de ce clip, à retoucher séparément"
+                style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:600;padding:5px 10px;border-radius:9999px;cursor:pointer;">🧬 Dupliquer</button>
+              <button type="button" data-split="${c.id}" title="Scinde ce clip en deux clips indépendants (au milieu)"
+                style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:600;padding:5px 10px;border-radius:9999px;cursor:pointer;">✂️ Scinder en 2</button>
+              <button type="button" data-extend="${c.id}" title="Reprend un peu plus de matière avant/après, sans re-transcrire"
+                style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:600;padding:5px 10px;border-radius:9999px;cursor:pointer;">➕ Rallonger</button>
+            </div>
+          </div>
+          <div>
+            <div style="font-size:10px;font-weight:800;color:#8b5cf6;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Avancé</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;">
+              <button type="button" data-edit="${c.id}"
+                style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:600;padding:5px 10px;border-radius:9999px;cursor:pointer;">✏️ Timeline</button>
+              <button type="button" data-history="${c.id}"
+                style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:600;padding:5px 10px;border-radius:9999px;cursor:pointer;">🕘 Historique</button>
+              <button type="button" data-subtitles="${c.id}"
+                style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:600;padding:5px 10px;border-radius:9999px;cursor:pointer;">✍️ Sous-titres</button>
+            </div>
+          </div>
+          <div style="font-size:11px;color:#6b7280;margin-top:8px;">Ces commandes sont exécutées immédiatement (déterministe, gratuit, résultat rapide).</div>
+        `;
       }
 
       // Envoie une consigne (texte libre ou suggestion A3 en un clic) à /adjust,
@@ -568,35 +588,13 @@
           ${captionBlock}
           ${c.edl ? `
           <div style="margin-top:12px;padding:10px;background:#0f0f14;border:1px solid #2a2a35;border-radius:10px;">
-            <!-- A3 : suggestions en un clic, dérivées de l'EDL réel (aucun texte à écrire) -->
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
-              ${suggestButtons(c).map(b => `
-                <button data-suggest="${c.id}" data-instruction="${esc(b.instruction)}"
-                  style="background:#20202a;border:1px solid #3a3a48;color:#d1d5db;font-size:11px;font-weight:700;padding:6px 12px;border-radius:9999px;cursor:pointer;">${b.label}</button>
-              `).join('')}
-            </div>
-            <!-- A2 : invitation visible, champ déjà ouvert (pas caché derrière un bouton) -->
-            <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:2px;">Ce clip ne vous convient pas ? Dites-le en une phrase.</div>
+            <!-- Catégorie unique : toutes les retouches (EDL + actions sur le
+                 clip + panneaux avancés) vivent dans le panneau Commandes. -->
+            <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:2px;">Ce clip ne vous convient pas ?</div>
             <div style="font-size:11px;color:#86efac;margin-bottom:8px;">Les retouches sont illimitées et gratuites.</div>
-            <input data-adjust-input="${c.id}" placeholder="ex. « moins de zooms », « sous-titres plus gros », « en jaune »"
-              style="width:100%;box-sizing:border-box;background:#17171d;border:1px solid #2a2a35;color:#fff;font-size:12px;padding:8px;border-radius:8px;" />
-            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">
-              <button data-adjust="${c.id}" data-rev="${c.edl_rev ?? 0}"
-                style="background:#8b5cf6;color:#fff;border:0;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">Ajuster</button>
-              <button data-edit="${c.id}"
-                style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">✏️ Timeline</button>
-              <button data-history="${c.id}"
-                style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">🕘 Historique</button>
-              <button data-subtitles="${c.id}"
-                style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">✍️ Sous-titres</button>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
               <button data-commands="${c.id}"
-                style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">📋 Commandes</button>
-              <button data-duplicate="${c.id}" title="Crée une copie indépendante de ce clip, à retoucher séparément"
-                style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">🧬 Dupliquer</button>
-              <button data-split="${c.id}" title="Scinde ce clip en deux clips indépendants (au milieu)"
-                style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">✂️ Scinder en 2</button>
-              <button data-extend="${c.id}" title="Reprend un peu plus de matière avant/après, sans re-transcrire"
-                style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-size:11px;font-weight:700;padding:7px 14px;border-radius:9999px;cursor:pointer;">➕ Rallonger</button>
+                style="background:#8b5cf6;color:#fff;border:0;font-size:12px;font-weight:800;padding:9px 18px;border-radius:9999px;cursor:pointer;">📋 Commandes</button>
               <span data-adjust-status="${c.id}" style="font-size:11px;color:#9ca3af;"></span>
             </div>
             <!-- A1 : compteur de retouches gratuites de CE clip, en permanence -->
@@ -607,7 +605,7 @@
             <div data-history-panel="${c.id}" style="display:none;margin-top:10px;background:#17171d;border:1px solid #2a2a35;border-radius:8px;padding:8px;max-height:220px;overflow-y:auto;"></div>
             <!-- A7 : panneau de correction des sous-titres au mot, replié par défaut -->
             <div data-subtitles-panel="${c.id}" style="display:none;margin-top:10px;background:#17171d;border:1px solid #2a2a35;border-radius:8px;padding:10px;"></div>
-            <!-- 20 commandes exactes garanties reconnues, replié par défaut -->
+            <!-- Panneau unique des commandes, replié par défaut -->
             <div data-commands-panel="${c.id}" style="display:none;margin-top:10px;background:#17171d;border:1px solid #2a2a35;border-radius:8px;padding:10px;"></div>
             <div data-editor="${c.id}" style="display:none;margin-top:10px;"></div>
           </div>` : ''}
@@ -615,20 +613,18 @@
       }).join('');
 
       // A2 : si aucune retouche n'a été faite 30 s après l'affichage d'un clip
-      // sans EDL retouché, on relance discrètement l'invitation (léger surlignage
-      // du champ, une seule fois).
+      // sans EDL retouché, on relance discrètement l'invitation (léger
+      // surlignage du bouton Commandes, une seule fois).
       rows.forEach((c) => {
         if (!c.edl || (c.edl_rev ?? 0) > 0) return;
-        const input = grid.querySelector(`[data-adjust-input="${c.id}"]`);
-        if (!input) return;
+        const btn = grid.querySelector(`[data-commands="${c.id}"]`);
+        if (!btn) return;
         setTimeout(() => {
-          if (input.value || input.dataset.nudged) return;
-          input.dataset.nudged = '1';
-          input.style.transition = 'box-shadow .3s, border-color .3s';
-          input.style.borderColor = '#8b5cf6';
-          input.style.boxShadow = '0 0 0 3px rgba(139,92,246,.25)';
-          input.focus({ preventScroll: true });
-          setTimeout(() => { input.style.borderColor = '#2a2a35'; input.style.boxShadow = 'none'; }, 2200);
+          if (btn.dataset.nudged) return;
+          btn.dataset.nudged = '1';
+          btn.style.transition = 'box-shadow .3s';
+          btn.style.boxShadow = '0 0 0 4px rgba(139,92,246,.35)';
+          setTimeout(() => { btn.style.boxShadow = 'none'; }, 2200);
         }, 30000);
       });
 
@@ -705,31 +701,6 @@
           return;
         }
 
-        // A3 : suggestion en un clic — même chemin déterministe que le champ
-        // texte (l'instruction exacte est reconnue par apply_text_adjustment,
-        // donc jamais de passage par le LLM).
-        const suggestBtn = e.target.closest('[data-suggest]');
-        if (suggestBtn) {
-          const clipId = suggestBtn.getAttribute('data-suggest');
-          const instruction = suggestBtn.getAttribute('data-instruction');
-          const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
-          await submitAdjust(clipId, { instruction }, suggestBtn, status);
-          return;
-        }
-
-        // Ajustement par texte libre : envoie la consigne, puis attend la fin
-        // du re-rendu en surveillant edl_rev.
-        const adjBtn = e.target.closest('[data-adjust]');
-        if (adjBtn) {
-          const clipId = adjBtn.getAttribute('data-adjust');
-          const input = grid.querySelector(`[data-adjust-input="${clipId}"]`);
-          const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
-          const instruction = (input?.value || '').trim();
-          if (!instruction) { status.style.color = '#fca5a5'; status.textContent = 'Écris une consigne.'; return; }
-          await submitAdjust(clipId, { instruction }, adjBtn, status, (rev) => adjBtn.setAttribute('data-rev', String(rev)));
-          return;
-        }
-
         // A4 : ouvrir/fermer le panneau d'historique des versions.
         const historyBtn = e.target.closest('[data-history]');
         if (historyBtn) {
@@ -760,32 +731,37 @@
           return;
         }
 
-        // 20 commandes exactes : ouvrir/fermer le panneau de référence.
+        // Catégorie unique : ouvrir/fermer le panneau de commandes (contient
+        // aussi désormais les actions sur le clip et les panneaux avancés).
         const commandsBtn = e.target.closest('[data-commands]');
         if (commandsBtn) {
           const clipId = commandsBtn.getAttribute('data-commands');
           const panel = grid.querySelector(`[data-commands-panel="${clipId}"]`);
           if (panel.style.display === 'none') {
             panel.style.display = 'block';
-            panel.innerHTML = commandsPanelHtml();
+            panel.innerHTML = commandsPanelHtml(clipsById[clipId]);
           } else {
             panel.style.display = 'none';
           }
           return;
         }
 
-        // 20 commandes exactes : un clic remplit le champ (pas d'envoi
-        // automatique — certaines commandes, comme le titre incrusté,
-        // doivent être personnalisées avant d'être envoyées).
-        const fillBtn = e.target.closest('[data-fill-command]');
-        if (fillBtn) {
-          const panelEl = fillBtn.closest('[data-commands-panel]');
-          const clipId = panelEl ? panelEl.getAttribute('data-commands-panel') : null;
-          const input = clipId ? grid.querySelector(`[data-adjust-input="${clipId}"]`) : null;
-          if (input) {
-            input.value = fillBtn.getAttribute('data-fill-command');
-            input.focus();
+        // Commande EDL : exécution IMMÉDIATE (plus de champ à remplir). Les
+        // commandes qui ont besoin d'une valeur (titre, mot à mettre en
+        // valeur) la demandent via une invite avant d'envoyer.
+        const runBtn = e.target.closest('[data-run-command]');
+        if (runBtn) {
+          const clipId = runBtn.getAttribute('data-run-command');
+          const status = grid.querySelector(`[data-adjust-status="${clipId}"]`);
+          let instruction = runBtn.getAttribute('data-instruction');
+          const promptLabel = runBtn.getAttribute('data-prompt');
+          if (promptLabel) {
+            const value = window.prompt(promptLabel, '');
+            if (value === null) return;   // annulé
+            if (!value.trim()) { status.style.color = '#fca5a5'; status.textContent = 'Valeur requise.'; return; }
+            instruction = instruction.replace('{value}', value.trim());
           }
+          await submitAdjust(clipId, { instruction }, runBtn, status);
           return;
         }
 
