@@ -84,9 +84,9 @@ MAX_CLIPS_PER_VIDEO = 6
 ENABLE_AUTO_DIRECTOR = False
 
 # Les quotas d'usage sont désormais exprimés en MINUTES de source et pilotés
-# par pricing_config.PLANS (voir tarifs.html et les fonctions available_minutes /
-# reserve_minutes / enforce_source_caps). L'ancien décompte « en nombre de
-# vidéos » (PLAN_MONTHLY_LIMITS) a été retiré : il ne reflétait plus le modèle
+# par pricing_config.PLANS (voir tarifs.html et les fonctions reserve_real_minutes /
+# enforce_source_caps). L'ancien décompte « en nombre de vidéos »
+# (PLAN_MONTHLY_LIMITS) a été retiré : il ne reflétait plus le modèle
 # tarifaire réel et n'était plus appelé.
 
 # Audit E5 (AUDIT.md #3) : un bypass de facturation codé en dur (un email
@@ -352,28 +352,6 @@ def _reset_period_if_needed(supabase, user_id: str) -> float:
     return float(row.get("minutes_used") or 0)
 
 
-def _subscription_remaining(supabase, user_id: str, plan: str) -> float:
-    used = _reset_period_if_needed(supabase, user_id)
-    return max(0.0, pricing.plan_minutes(plan) - used)
-
-
-def _active_packs(supabase, user_id: str) -> list:
-    """Lots de crédits non expirés avec du solde, du plus proche à expirer
-    au plus lointain (on consomme les périssables d'abord)."""
-    now_iso = _now().isoformat()
-    res = (
-        supabase.table("credit_packs").select("*")
-        .eq("user_id", user_id).gt("minutes_remaining", 0)
-        .gte("expires_at", now_iso).order("expires_at").execute()
-    )
-    return res.data or []
-
-
-def available_minutes(supabase, user_id: str, plan: str) -> float:
-    credit = sum(float(p["minutes_remaining"]) for p in _active_packs(supabase, user_id))
-    return _subscription_remaining(supabase, user_id, plan) + credit
-
-
 def enforce_source_caps(plan: str, seconds: float):
     """Refuse une source trop longue. Plafond dur 4 h, puis plafond du plan."""
     if seconds > pricing.GLOBAL_MAX_SOURCE_SECONDS:
@@ -417,37 +395,32 @@ def reserve_processing_slot(supabase, user_id: str, source_path: str,
     return data or {"allowed": False, "reason": "rpc_empty_response"}
 
 
-def reserve_minutes(supabase, user_id: str, plan: str, source_id: str, minutes: float) -> list:
-    """Réserve `minutes` : crédits (expiration proche) d'abord, puis abonnement.
-    Retourne les lignes usage_log réservées (pour commit ou remboursement)."""
-    remaining = float(minutes)
-    reservations = []
-    for pack in _active_packs(supabase, user_id):
-        if remaining <= 1e-9:
-            break
-        avail = float(pack["minutes_remaining"])
-        take = min(remaining, avail)
-        supabase.table("credit_packs").update(
-            {"minutes_remaining": avail - take}
-        ).eq("id", pack["id"]).execute()
-        r = supabase.table("usage_log").insert({
-            "user_id": user_id, "source_id": source_id, "minutes_debited": take,
-            "debited_from": "credit_pack", "credit_pack_id": pack["id"], "status": "reserved",
-        }).execute()
-        reservations.append(r.data[0])
-        remaining -= take
-    if remaining > 1e-9:
-        used = _reset_period_if_needed(supabase, user_id)
-        supabase.table("profiles").upsert({
-            "user_id": user_id, "minutes_used": used + remaining,
-            "quota_period_start": _period_start_str(),
-        }).execute()
-        r = supabase.table("usage_log").insert({
-            "user_id": user_id, "source_id": source_id, "minutes_debited": remaining,
-            "debited_from": "subscription", "status": "reserved",
-        }).execute()
-        reservations.append(r.data[0])
-    return reservations
+def reserve_real_minutes(supabase, user_id: str, plan: str, source_id: str, minutes: float) -> dict:
+    """Vérifie ET débite ATOMIQUEMENT le solde réel (durée ffprobe exacte),
+    via la fonction Postgres reserve_real_minutes (verrou transactionnel par
+    utilisateur, schema_quota_debit_race_fix.sql).
+
+    Bug réel trouvé en auditant tout le repo (finding #5) : l'ancien code
+    faisait un `available_minutes()` (lecture) PUIS un `reserve_minutes()`
+    (écriture) en deux appels séparés, non atomiques — deux vidéos du même
+    utilisateur, chacune individuellement sous son quota, pouvaient toutes
+    deux lire le même solde avant que l'une ne débite réellement, dépassant
+    le quota total autorisé. Remplace ce couple lecture/écriture par un seul
+    appel RPC verrouillé.
+
+    Renvoie {"allowed": bool, "available": float|None, "reservations": list}
+    — `reservations` a le même format que `reserve_minutes()` (utilisable
+    tel quel par `commit_reservations`/`refund_reservations`)."""
+    result = supabase.rpc("reserve_real_minutes", {
+        "p_user_id": user_id, "p_source_id": source_id,
+        "p_needed_minutes": minutes, "p_plan_minutes": pricing.plan_minutes(plan),
+    }).execute()
+    data = result.data
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    data = data or {"allowed": False, "reason": "rpc_empty_response"}
+    data.setdefault("reservations", [])
+    return data
 
 
 def commit_reservations(supabase, reservations: list, source_seconds: float | None = None):
@@ -1672,13 +1645,17 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             # portée UX synchrone). En cas d'échec ultérieur, refund intégral.
             if not skip_billing:
                 need_minutes = duration / 60.0
-                if need_minutes > available_minutes(supabase, user_id, plan) + 1e-6:
+                # Vérifie ET débite en une seule transaction verrouillée
+                # (voir reserve_real_minutes ci-dessus) — ferme la course
+                # entre deux vidéos concurrentes du même utilisateur.
+                debit = reserve_real_minutes(supabase, user_id, plan, source_path, need_minutes)
+                if not debit.get("allowed"):
                     raise RuntimeError(
                         f"Solde de minutes insuffisant : cette vidéo demande "
                         f"{need_minutes:.0f} min. Recharge avec le pack crédits "
                         "(60 min, 7,90 €) ou passe à un plan supérieur."
                     )
-                reservations = reserve_minutes(supabase, user_id, plan, source_path, need_minutes)
+                reservations = debit["reservations"]
 
             words, full_text = transcribe(local_video)
             video_duration = (words[-1]["end"] - words[0]["start"]) if words else 0.0
