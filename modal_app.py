@@ -113,6 +113,38 @@ ALLOWED_ORIGINS = [
 
 SITE_URL = "https://sortclip.fr"
 
+# Garde-fou produit obligatoire avant tout traitement : chaque vidéo doit
+# déclarer sur quelle base elle a le droit d'être clippée. Choix imposé (pas
+# de texte libre pour l'origine elle-même) — deux options exigent un détail
+# non vide (nom du programme / lien de la campagne), les deux autres non.
+AUTHORIZATION_ORIGINS = {
+    "own_content": {"requires_detail": False},
+    "official_program": {"requires_detail": True},
+    "paid_campaign": {"requires_detail": True},
+    "written_authorization": {"requires_detail": False},
+}
+
+
+def _validate_authorization(payload: dict) -> tuple[str, str | None] | JSONResponse:
+    """Valide l'origine de l'autorisation. Renvoie (origin, detail) si valide,
+    ou directement une JSONResponse d'erreur (400) sinon — l'appelant doit
+    tester le type du retour avant de continuer."""
+    origin = (payload.get("authorizationOrigin") or "").strip()
+    detail = (payload.get("authorizationDetail") or "").strip() or None
+    spec = AUTHORIZATION_ORIGINS.get(origin)
+    if not spec:
+        return JSONResponse({
+            "error": "Précise l'origine de l'autorisation pour cette vidéo avant de continuer.",
+            "code": "authorization_origin_required",
+        }, status_code=400)
+    if spec["requires_detail"] and not detail:
+        label = "le nom du programme" if origin == "official_program" else "le lien de la campagne"
+        return JSONResponse({
+            "error": f"Précise {label} pour cette origine d'autorisation.",
+            "code": "authorization_detail_required",
+        }, status_code=400)
+    return origin, detail
+
 # Correspondance entre les produits Stripe (créés dans le dashboard) et les
 # plans internes de Sortclip.
 STRIPE_PRODUCT_TO_PLAN = {
@@ -377,17 +409,25 @@ def enforce_source_caps(plan: str, seconds: float):
 # (supabase/schema_race_fix.sql) — voir reserve_processing_slot() plus bas.
 def reserve_processing_slot(supabase, user_id: str, source_path: str,
                             max_concurrent: int, plan_minutes: float,
-                            needed_minutes: float) -> dict:
+                            needed_minutes: float, authorization_origin: str,
+                            authorization_detail: str | None) -> dict:
     """Réserve ATOMIQUEMENT une place de traitement (concurrence) et,
     optionnellement, une estimation de quota — via la fonction Postgres
     reserve_processing_slot (verrou transactionnel par utilisateur, ferme la
     course entre la vérification et l'enregistrement). Renvoie
     {"allowed": bool, "reason": str|None, ...}. `needed_minutes=0` désactive
-    la vérification de quota (cas YouTube : durée inconnue avant téléchargement)."""
+    la vérification de quota (cas YouTube : durée inconnue avant téléchargement).
+
+    `authorization_origin`/`authorization_detail` : garde-fou produit
+    obligatoire — déjà validé par l'appelant (handle()) avant cet appel,
+    persisté ici dès la création de clip_jobs pour ne jamais avoir de projet
+    sans origine déclarée."""
     result = supabase.rpc("reserve_processing_slot", {
         "p_user_id": user_id, "p_source_path": source_path,
         "p_max_concurrent": max_concurrent, "p_plan_minutes": plan_minutes,
         "p_needed_minutes": needed_minutes,
+        "p_authorization_origin": authorization_origin,
+        "p_authorization_detail": authorization_detail,
     }).execute()
     data = result.data
     if isinstance(data, list):
@@ -1558,7 +1598,7 @@ def _insert_clips_resilient(supabase, rows: list):
 
 
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=2400)
-def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False, preset: str | None = None):
+def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False, preset: str | None = None, authorization_origin: str | None = None, authorization_detail: str | None = None):
     style = resolve_subtitle_style(subtitle_style, preset=preset)
     supabase = get_supabase_client()
     plan = get_user_plan(supabase, user_id)
@@ -1745,6 +1785,13 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                         "edl": clip_edl.model_dump(mode="json") if clip_edl else None,
                         "edl_words": clip_edl_words,
                         "edl_resolution": resolution,
+                        # Garde-fou produit obligatoire (origine de
+                        # l'autorisation) — aussi une fonctionnalité de suivi
+                        # de revenus : chaque clip hérite de la déclaration
+                        # faite à l'upload, pour filtrer/grouper par campagne
+                        # sans remonter à la vidéo source.
+                        "authorization_origin": authorization_origin,
+                        "authorization_detail": authorization_detail,
                     })
                 except Exception as clip_exc:
                     # Un clip qui échoue au montage ne doit pas faire échouer
@@ -1904,6 +1951,14 @@ def process():
             if not youtube_url and not source_path.startswith(f"{user_id}/"):
                 return JSONResponse({"error": "Chemin invalide"}, status_code=403)
 
+            # Garde-fou produit obligatoire : chaque projet doit déclarer son
+            # origine d'autorisation AVANT tout traitement (voir
+            # AUTHORIZATION_ORIGINS/_validate_authorization plus haut).
+            auth_check = _validate_authorization(payload)
+            if isinstance(auth_check, JSONResponse):
+                return auth_check
+            authorization_origin, authorization_detail = auth_check
+
             # Garde-fou de concurrence ET estimation de quota, réservés de façon
             # ATOMIQUE (verrou transactionnel par utilisateur côté Postgres) —
             # ferme la course entre la vérification et l'enregistrement qui
@@ -1915,6 +1970,7 @@ def process():
             slot = reserve_processing_slot(
                 supabase, user_id, source_path, max_concurrent,
                 pricing.plan_minutes(plan), 0.0 if skip_billing else needed_minutes,
+                authorization_origin, authorization_detail,
             )
             if not slot.get("allowed"):
                 reason = slot.get("reason")
@@ -1943,10 +1999,10 @@ def process():
                 # Pour YouTube, la durée n'est pas connue côté client : le
                 # contrôle (plafond + solde) est fait dans process_video avant
                 # tout traitement coûteux.
-                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset)
+                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset, authorization_origin=authorization_origin, authorization_detail=authorization_detail)
                 return {"status": "processing_started", "sourcePath": source_path}
 
-            process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset)
+            process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset, authorization_origin=authorization_origin, authorization_detail=authorization_detail)
             return {"status": "processing_started", "sourcePath": source_path}
         except Exception as exc:
             print(f"[handle] Erreur non gérée : {exc}")

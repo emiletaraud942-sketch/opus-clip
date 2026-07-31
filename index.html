@@ -39,6 +39,24 @@
       <h1 style="font-family:'Space Grotesk',sans-serif;font-size:44px;font-weight:700;line-height:1.15;margin:0 0 20px;">Le seul outil de clipping où corriger ne coûte rien.</h1>
       <p style="font-size:16px;color:#9ca3af;margin:0 0 32px;">Importez votre podcast, stream ou webinar. Notre IA repère les meilleurs moments, sous-titre et recadre automatiquement. Un clip ne convient pas ? Une phrase suffit pour le corriger — gratuitement, sans jamais retoucher à votre quota.</p>
 
+      <!-- Garde-fou produit obligatoire (avant tout traitement) : origine de
+           l'autorisation. Présenté comme un outil de suivi de revenus
+           ("Sortclip range vos clips par campagne"), pas comme un contrôle —
+           les clippeurs rattachent déjà chaque clip à une campagne pour se
+           faire payer. -->
+      <div id="authorization-origin-box" style="background:#17171d;border:1px solid #2a2a35;border-radius:16px;padding:16px 18px;margin-bottom:14px;">
+        <div style="font-size:13px;font-weight:700;margin-bottom:2px;">D'où vient cette vidéo ?</div>
+        <div style="font-size:11px;color:#9ca3af;margin-bottom:10px;">Sortclip range vos clips par campagne — pratique pour retrouver de quoi vous êtes payé, campagne par campagne.</div>
+        <div style="display:flex;flex-direction:column;gap:8px;font-size:13px;color:#d1d5db;">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="radio" name="authorization-origin" value="own_content" checked style="accent-color:#8b5cf6;"> Mon propre contenu</label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="radio" name="authorization-origin" value="official_program" style="accent-color:#8b5cf6;"> Programme officiel</label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="radio" name="authorization-origin" value="paid_campaign" style="accent-color:#8b5cf6;"> Campagne rémunérée</label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="radio" name="authorization-origin" value="written_authorization" style="accent-color:#8b5cf6;"> Autorisation écrite de l'ayant droit</label>
+        </div>
+        <input id="authorization-detail" type="text" style="display:none;width:100%;box-sizing:border-box;margin-top:10px;background:#0f0f14;border:1px solid #2a2a35;color:#fff;font-size:13px;padding:9px 12px;border-radius:8px;" />
+        <div id="authorization-origin-error" style="display:none;color:#fca5a5;font-size:11px;margin-top:6px;"></div>
+      </div>
+
       <label for="video-upload" style="display:flex;align-items:center;gap:12px;background:#17171d;border:1px dashed #3a3a48;border-radius:16px;padding:18px 20px;margin-bottom:12px;cursor:pointer;">
         <div style="width:36px;height:36px;background:rgba(244,63,142,.12);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">⬆️</div>
         <div style="flex:1;">
@@ -367,6 +385,58 @@
     youtubeUrlInput.disabled = busy;
     youtubeSubmitBtn.style.opacity = busy ? '0.5' : '1';
     youtubeSubmitBtn.style.cursor = busy ? 'not-allowed' : 'pointer';
+    authOriginRadios.forEach(r => { r.disabled = busy; });
+    authDetailInput.disabled = busy;
+  }
+
+  // Garde-fou produit obligatoire : origine de l'autorisation (voir bloc HTML
+  // "authorization-origin-box"). Deux options exigent un détail non vide
+  // (nom du programme / lien de la campagne) — mêmes valeurs et même règle
+  // que AUTHORIZATION_ORIGINS côté backend (modal_app.py), qui revalide de
+  // toute façon avant tout traitement.
+  const AUTHORIZATION_DETAIL_PLACEHOLDERS = {
+    official_program: 'Nom du programme',
+    paid_campaign: 'Lien de la campagne',
+  };
+  const authOriginRadios = document.querySelectorAll('input[name="authorization-origin"]');
+  const authDetailInput = document.getElementById('authorization-detail');
+  const authOriginError = document.getElementById('authorization-origin-error');
+
+  function updateAuthorizationDetailField() {
+    const selected = document.querySelector('input[name="authorization-origin"]:checked')?.value;
+    const placeholder = AUTHORIZATION_DETAIL_PLACEHOLDERS[selected];
+    authOriginError.style.display = 'none';
+    if (placeholder) {
+      authDetailInput.style.display = 'block';
+      authDetailInput.placeholder = placeholder;
+    } else {
+      authDetailInput.style.display = 'none';
+      authDetailInput.value = '';
+    }
+  }
+  authOriginRadios.forEach(r => r.addEventListener('change', updateAuthorizationDetailField));
+  updateAuthorizationDetailField();
+
+  function getAuthorization() {
+    const origin = document.querySelector('input[name="authorization-origin"]:checked')?.value || '';
+    const detail = authDetailInput.value.trim();
+    return { origin, detail };
+  }
+
+  // Bloque AVANT tout upload/lancement si le détail requis manque — le
+  // contrôle backend existe aussi (défense en profondeur), mais on évite ici
+  // à l'utilisateur d'attendre un aller-retour réseau pour rien.
+  function validateAuthorizationOrGuide() {
+    const { origin, detail } = getAuthorization();
+    if ((origin === 'official_program' || origin === 'paid_campaign') && !detail) {
+      authOriginError.style.display = 'block';
+      authOriginError.textContent = origin === 'official_program'
+        ? 'Précise le nom du programme.'
+        : 'Précise le lien de la campagne.';
+      authDetailInput.focus();
+      return false;
+    }
+    return true;
   }
 
   const MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 Go
@@ -395,6 +465,11 @@
     }
 
     document.getElementById('upload-filename').textContent = file.name;
+
+    if (!validateAuthorizationOrGuide()) {
+      videoUploadInput.value = '';
+      return;
+    }
 
     // Durée lue côté client (indice pour le contrôle de quota synchrone : on
     // refuse AVANT tout traitement si le solde de minutes est insuffisant).
@@ -428,7 +503,8 @@
       return;
     }
     lastYoutubeUrl = null;   // la dernière soumission est un upload, pas un lien
-    await startProcessing({ path, subtitleStyle: getSubtitleStyle(), sourceDurationSeconds, preset: getPreset() }, freshToken);
+    const { origin: authorizationOrigin, detail: authorizationDetail } = getAuthorization();
+    await startProcessing({ path, subtitleStyle: getSubtitleStyle(), sourceDurationSeconds, preset: getPreset(), authorizationOrigin, authorizationDetail }, freshToken);
   });
 
   // Dernier lien YouTube soumis (null si la dernière soumission était un upload).
@@ -446,6 +522,8 @@
     if (!url || processingInFlight) return;
     hideYoutubeError();
 
+    if (!validateAuthorizationOrGuide()) return;
+
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) {
       showUploadStatus('Crée un compte gratuit pour utiliser un lien YouTube.', '#fca5a5');
@@ -462,7 +540,8 @@
       setBusy(false);
       return;
     }
-    await startProcessing({ youtubeUrl: url, subtitleStyle: getSubtitleStyle(), preset: getPreset() }, freshToken);
+    const { origin: authorizationOrigin, detail: authorizationDetail } = getAuthorization();
+    await startProcessing({ youtubeUrl: url, subtitleStyle: getSubtitleStyle(), preset: getPreset(), authorizationOrigin, authorizationDetail }, freshToken);
   }
 
   youtubeSubmitBtn.addEventListener('click', () => runYoutube(youtubeUrlInput.value.trim()));

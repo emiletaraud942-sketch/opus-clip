@@ -93,6 +93,19 @@
     <!-- Bannières d'état des générations récentes (en cours / échec). -->
     <div id="job-status" style="display:none;margin-bottom:24px;"></div>
 
+    <!-- Sortclip range vos clips par campagne (garde-fou origine de
+         l'autorisation déclaré à l'upload) — présenté comme un outil de
+         suivi de revenus : filtrer les clips d'une campagne pour retrouver
+         de quoi vous êtes payé, pas comme un contrôle. -->
+    <div id="campaign-filter-box" style="display:none;margin-bottom:16px;">
+      <label style="font-size:12px;color:#9ca3af;">
+        Filtrer par campagne
+        <select id="campaign-filter" style="display:block;margin-top:4px;background:#17171d;border:1px solid #2a2a35;color:#fff;font-size:13px;padding:8px 12px;border-radius:8px;min-width:220px;">
+          <option value="">Toutes les campagnes</option>
+        </select>
+      </label>
+    </div>
+
     <div id="clips-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;"></div>
   </div>
 </section>
@@ -580,8 +593,37 @@
         });
       });
 
+      // Sortclip range vos clips par campagne : libellé lisible depuis
+      // authorization_origin/authorization_detail (garde-fou déclaré à
+      // l'upload). null/undefined = clip généré avant ce correctif — pas de
+      // badge plutôt qu'un badge trompeur.
+      const AUTHORIZATION_ORIGIN_LABELS = {
+        own_content: 'Contenu propre',
+        official_program: 'Programme',
+        paid_campaign: 'Campagne',
+        written_authorization: 'Autorisation écrite',
+      };
+      function campaignLabel(c) {
+        const base = AUTHORIZATION_ORIGIN_LABELS[c.authorization_origin];
+        if (!base) return null;
+        return c.authorization_detail ? `${base} · ${c.authorization_detail}` : base;
+      }
+
+      // Filtre par campagne : rempli depuis les libellés réellement présents
+      // (une entrée par valeur distincte de authorization_detail pour
+      // official_program/paid_campaign, ou par origine sinon).
+      const campaignFilterBox = document.getElementById('campaign-filter-box');
+      const campaignFilterSelect = document.getElementById('campaign-filter');
+      const campaignValues = [...new Set(rows.map(campaignLabel).filter(Boolean))];
+      if (campaignValues.length > 0) {
+        campaignFilterBox.style.display = 'block';
+        campaignFilterSelect.insertAdjacentHTML('beforeend',
+          campaignValues.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(''));
+      }
+
       const grid = document.getElementById('clips-grid');
-      grid.innerHTML = rows.map(c => {
+      function renderGrid(list) {
+      grid.innerHTML = list.map(c => {
         const tags = Array.isArray(c.hashtags) ? c.hashtags : [];
         const tagsLine = tags.length ? tags.map(t => '#' + t).join(' ') : '';
         const captionBlock = c.caption ? `
@@ -601,6 +643,7 @@
             <span style="background:#f43f8e;font-size:11px;font-weight:800;padding:4px 10px;border-radius:9999px;white-space:nowrap;margin-left:8px;">${c.score ?? '?'}</span>
           </div>
           <div style="font-size:12px;color:#6b7280;margin-bottom:12px;">${new Date(c.created_at).toLocaleDateString('fr-FR')} · ${Math.round(c.end_time - c.start_time)}s</div>
+          ${campaignLabel(c) ? `<div style="display:inline-block;background:#1b1420;border:1px solid #3a2a55;color:#c4b5fd;font-size:10px;font-weight:700;padding:3px 9px;border-radius:9999px;margin-bottom:10px;">${esc(campaignLabel(c))}</div>` : ''}
           <div style="display:flex;gap:8px;">
             <button data-open="${esc(c.storage_path)}" style="flex:1;background:#2a2a35;color:#fff;border:0;font-size:12px;font-weight:700;padding:9px;border-radius:9999px;cursor:pointer;">▶ Ouvrir</button>
             <button data-download="${esc(c.storage_path)}" data-name="${dl}" style="flex:1;background:#f43f8e;color:#fff;border:0;font-size:12px;font-weight:700;padding:9px;border-radius:9999px;cursor:pointer;">⬇ Télécharger</button>
@@ -644,6 +687,13 @@
           </div>` : ''}
         </div>`;
       }).join('');
+      }
+      renderGrid(rows);
+
+      campaignFilterSelect.addEventListener('change', () => {
+        const value = campaignFilterSelect.value;
+        renderGrid(value ? rows.filter(c => campaignLabel(c) === value) : rows);
+      });
 
       // A2 : si aucune retouche n'a été faite 30 s après l'affichage d'un clip
       // sans EDL retouché, on relance discrètement l'invitation (léger
