@@ -405,19 +405,19 @@
               triggerEl.disabled = false;
               bumpRetouchCounter(clipId, Number(row.edl_rev));
               if (onDoneRev) onDoneRev(Number(row.edl_rev));
-            } else if (tries > 200) {
+            } else if (tries > 250) {
               // Bug réel signalé : ce délai était de 40*3s=120s alors que le
               // re-rendu backend (rerender_clip) s'autorise jusqu'à 1200s
               // (20 min, démarrage à froid + téléchargement de la source +
               // encodage ffmpeg inclus) — le traitement était très
               // probablement encore en cours quand l'utilisateur voyait déjà
-              // "délai dépassé". Relevé à 200*3s=600s, avec un message qui ne
-              // laisse plus croire à un échec certain.
+              // "délai dépassé". Relevé à 250*5s=1250s (couvre le plafond backend), avec un message
+              // qui ne laisse plus croire à un échec certain.
               clearInterval(poll); statusEl.style.color = '#fca5a5';
               statusEl.textContent = 'Ça prend plus longtemps que prévu — le traitement continue peut-être en arrière-plan. Recharge la page dans quelques minutes avant de relancer la commande.';
               triggerEl.disabled = false;
             }
-          }, 3000);
+          }, 5000);
         } catch {
           statusEl.style.color = '#fca5a5'; statusEl.textContent = 'Erreur réseau.'; triggerEl.disabled = false;
         }
@@ -450,16 +450,16 @@
               clearInterval(poll); statusEl.style.color = '#86efac';
               statusEl.textContent = 'Terminé ✓ — recharge la page pour voir le(s) nouveau(x) clip(s).';
               triggerEl.disabled = false;
-            } else if (tries > 200) {
+            } else if (tries > 250) {
               // Même correction que submitAdjust : split_clip/extend_clip
-              // s'autorisent jusqu'à 1200s côté backend, 60*3s=180s était
-              // bien trop court pour un démarrage à froid + téléchargement +
-              // encodage.
+              // s'autorisent jusqu'à 1200s côté backend (démarrage à froid +
+              // téléchargement + encodage inclus), 60*3s=180s était bien
+              // trop court, relevé à 250*5s=1250s pour les couvrir.
               clearInterval(poll); statusEl.style.color = '#fca5a5';
               statusEl.textContent = 'Ça prend plus longtemps que prévu — le traitement continue peut-être en arrière-plan. Recharge la page dans quelques minutes avant de réessayer.';
               triggerEl.disabled = false;
             }
-          }, 3000);
+          }, 5000);
         } catch {
           statusEl.style.color = '#fca5a5'; statusEl.textContent = 'Erreur réseau.'; triggerEl.disabled = false;
         }
@@ -969,13 +969,13 @@
                 clearInterval(poll); status.style.color = '#86efac';
                 status.textContent = 'Mis à jour ✓ — rouvre le clip.';
                 bumpRetouchCounter(clipId, Number(row.edl_rev));
-              } else if (tries > 200) {
+              } else if (tries > 250) {
                 // Même correction que submitAdjust : 40*3s=120s était bien
-                // trop court face aux 1200s alloués côté backend au re-rendu.
+                // trop court face aux 1200s alloués côté backend, relevé à 250*5s=1250s.
                 clearInterval(poll); status.style.color = '#fca5a5';
                 status.textContent = 'Ça prend plus longtemps que prévu — le traitement continue peut-être en arrière-plan. Recharge la page dans quelques minutes.';
               }
-            }, 3000);
+            }, 5000);
           } catch {
             status.style.color = '#fca5a5'; status.textContent = 'Erreur réseau.';
           }
