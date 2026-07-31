@@ -377,6 +377,15 @@
             triggerEl.disabled = false;
             return;
           }
+          // B1 : consigne COMPRISE mais déjà satisfaite (ex: sous-titres déjà
+          // à la taille maximum) -> pas d'erreur, pas de re-rendu à attendre,
+          // juste la note explicative (distinct de "not_understood" ci-dessus).
+          if (data.status === 'no_change') {
+            statusEl.style.color = '#9ca3af';
+            statusEl.textContent = 'ℹ ' + ((data.notes || []).join(' · ') || 'Aucun changement nécessaire.');
+            triggerEl.disabled = false;
+            return;
+          }
           const baseRev = data.rev ?? (Number(clipsById[clipId]?.edl_rev) || 0);
           statusEl.style.color = '#9ca3af';
           statusEl.textContent = ((data.notes || []).join(' · ') || 'Ajustement') + ' — re-rendu en cours…';

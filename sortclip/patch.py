@@ -306,14 +306,26 @@ def apply_text_adjustment(edl: EDL, instruction: str,
 
     # --- Taille des sous-titres ---
     if "sous-titre" in s or "sous titre" in s or "texte" in s:
+        # B1 (prompt amélioration commandes) : sans ce contrôle, demander
+        # "plus gros" alors qu'on est déjà à la taille maximum (160) posait
+        # quand même la note "sous-titres agrandis (160)" — une fausse
+        # confirmation puisque RIEN n'avait changé.
         if "plus gros" in s or "plus grand" in s or "plus grand" in s:
-            edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(
-                update={"size": min(160, edl2.captions.size + 12)})})
-            notes.append(f"sous-titres agrandis ({edl2.captions.size})")
+            old_size = edl2.captions.size
+            new_size = min(160, old_size + 12)
+            if new_size == old_size:
+                notes.append(f"sous-titres déjà à la taille maximum ({old_size})")
+            else:
+                edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"size": new_size})})
+                notes.append(f"sous-titres agrandis ({new_size})")
         elif "plus petit" in s or "plus discret" in s:
-            edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(
-                update={"size": max(20, edl2.captions.size - 12)})})
-            notes.append(f"sous-titres réduits ({edl2.captions.size})")
+            old_size = edl2.captions.size
+            new_size = max(20, old_size - 12)
+            if new_size == old_size:
+                notes.append(f"sous-titres déjà à la taille minimum ({old_size})")
+            else:
+                edl2 = edl2.model_copy(update={"captions": edl2.captions.model_copy(update={"size": new_size})})
+                notes.append(f"sous-titres réduits ({new_size})")
         # Couleur des sous-titres
         for word, hexv in _COLOR_WORDS.items():
             if word in s:

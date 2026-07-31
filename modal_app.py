@@ -2647,15 +2647,23 @@ def adjust():
                 and final_edl_words == row.get("edl_words")
             )
             if nothing_changed:
+                # B1 (prompt amélioration commandes) : une consigne COMPRISE
+                # mais déjà satisfaite (ex: "plus gros" alors que les
+                # sous-titres sont déjà à la taille maximum) produit aussi un
+                # EDL inchangé -> il ne faut PAS la confondre avec une
+                # consigne réellement incomprise, sous peine d'afficher
+                # "Consigne non comprise" sur une commande qui a pourtant
+                # fonctionné comme prévu (juste sans marge de manœuvre).
+                really_not_understood = any("non reconnue" in n for n in notes) or not notes
                 return {
-                    "status": "not_understood",
+                    "status": "not_understood" if really_not_understood else "no_change",
                     "notes": notes,
                     "rev": row.get("edl_rev") or 0,
                     "error": (
                         "Consigne non comprise, aucun changement effectué. "
                         "Essaie une des commandes proposées, ou reformule "
                         "(ex. mets le texte à ajouter entre guillemets)."
-                    ),
+                    ) if really_not_understood else None,
                 }
 
             # A4 : historique versionné — chaque retouche (texte, timeline, ou
