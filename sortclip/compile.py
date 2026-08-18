@@ -448,15 +448,35 @@ def probe_source(path: str) -> tuple[int, int]:
     déclarée (cas fréquent des vidéos filmées au téléphone en portrait,
     encodées en paysage), largeur et hauteur sont inversées pour refléter ce
     que le lecteur affiche réellement. Sans ça, foreground_size()/le
-    recadrage calculent sur le mauvais ratio d'aspect -> image déformée."""
+    recadrage calculent sur le mauvais ratio d'aspect -> image déformée.
+
+    Bug réel rencontré : `-select_streams v:0` prend le PREMIER flux vidéo
+    sans distinction — une pochette/vignette embarquée (mp3 avec cover art,
+    certaines vidéos de téléphone avec une piste miniature avant la piste
+    principale) peut arriver en premier et ne pas exposer width/height de la
+    même façon, faisant planter l'ancien code avec un `KeyError('width')`
+    sans aucun contexte. On récupère TOUS les flux vidéo et on prend le
+    premier qui n'est pas une pochette (disposition attached_pic) ; erreur
+    explicite si aucun n'en a."""
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height:stream_tags=rotate:stream_side_data=rotation",
+        ["ffprobe", "-v", "error", "-select_streams", "v",
+         "-show_entries",
+         "stream=width,height:stream_tags=rotate:stream_side_data=rotation:stream_disposition=attached_pic",
          "-of", "json", path],
         capture_output=True, text=True, check=True,
     )
     data = json.loads(result.stdout)
-    stream = (data.get("streams") or [{}])[0]
+    streams = data.get("streams") or []
+    stream = next(
+        (s for s in streams if not (s.get("disposition") or {}).get("attached_pic")),
+        None,
+    )
+    if stream is None or "width" not in stream or "height" not in stream:
+        raise RuntimeError(
+            f"aucun flux vidéo exploitable (dimensions) trouvé dans {path} "
+            f"({len(streams)} flux vidéo détecté(s), tous une pochette ou "
+            "sans dimensions rapportées par ffprobe)"
+        )
     width, height = int(stream["width"]), int(stream["height"])
     if _rotation_degrees(stream) in (90, 270):
         width, height = height, width

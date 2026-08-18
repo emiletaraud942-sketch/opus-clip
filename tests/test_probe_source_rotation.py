@@ -64,6 +64,45 @@ def test_probe_source_no_swap_when_rotation_180():
     assert (w, h) == (1920, 1080)
 
 
+# --- Bug réel rencontré : pochette/vignette embarquée avant le vrai flux ---
+
+def _fake_ffprobe_streams(streams: list):
+    class _Result:
+        stdout = json.dumps({"streams": streams})
+    return _Result()
+
+
+def test_probe_source_skips_attached_pic_before_real_stream():
+    # Cas réel : un mp3 avec pochette (ou une vidéo téléphone avec vignette)
+    # expose la pochette comme PREMIER flux vidéo. Avant ce fix,
+    # `-select_streams v:0` la prenait telle quelle -> KeyError('width') sans
+    # aucun contexte si elle n'exposait pas ces champs.
+    cover = {"disposition": {"attached_pic": 1}}
+    real = {"width": 1080, "height": 1920, "disposition": {"attached_pic": 0}}
+    with patch("sortclip.compile.subprocess.run", return_value=_fake_ffprobe_streams([cover, real])):
+        w, h = probe_source("fake.mp3")
+    assert (w, h) == (1080, 1920)
+
+
+def test_probe_source_raises_clear_error_when_only_attached_pic():
+    cover = {"width": 300, "height": 300, "disposition": {"attached_pic": 1}}
+    with patch("sortclip.compile.subprocess.run", return_value=_fake_ffprobe_streams([cover])):
+        try:
+            probe_source("fake.mp3")
+            assert False, "aurait dû lever"
+        except RuntimeError as exc:
+            assert "aucun flux vidéo exploitable" in str(exc)
+
+
+def test_probe_source_raises_clear_error_when_no_streams_at_all():
+    with patch("sortclip.compile.subprocess.run", return_value=_fake_ffprobe_streams([])):
+        try:
+            probe_source("fake.mp4")
+            assert False, "aurait dû lever"
+        except RuntimeError as exc:
+            assert "aucun flux vidéo exploitable" in str(exc)
+
+
 if __name__ == "__main__":
     import subprocess
     r = subprocess.run([sys.executable, "-m", "pytest", __file__, "-q"])
