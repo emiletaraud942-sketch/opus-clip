@@ -966,23 +966,35 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme exac
   }}
 ]"""
 
-    response = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=4000,
-        system=[{
-            "type": "text",
-            "text": CLIP_SCORING_SYSTEM,
-            # D1 : TTL explicite (1h) — ce prompt système est identique pour
-            # toutes les vidéos de tous les utilisateurs, appelé en continu ;
-            # le TTL court par défaut (5 min) expirerait entre deux vidéos
-            # traitées à quelques minutes d'écart, perdant le bénéfice du cache.
-            "cache_control": {"type": "ephemeral", "ttl": "1h"},
-        }],
-        messages=[{"role": "user", "content": user_message}],
-    )
-    _record_usage(usage_sink, "claude-sonnet-4-5", response)
-
-    raw = response.content[0].text.strip()
+    # Bug réel observé : un échec de l'appel Claude lui-même (clé API
+    # invalide/expirée, panne/rate-limit Anthropic, timeout réseau) n'était
+    # PAS rattrapé ici — l'exception remontait telle quelle et faisait
+    # planter TOUT le traitement de la vidéo, alors que le reste de cette
+    # fonction sait déjà se rabattre sur une sélection automatique
+    # (_heuristic_clips / _last_resort_clips, juste plus bas) quand l'IA ne
+    # renvoie rien d'exploitable. On unifie les deux cas : un appel qui
+    # échoue est traité comme une réponse vide, qui déclenche le même filet
+    # de secours — jamais de vidéo perdue à cause d'une clé API mal configurée.
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=4000,
+            system=[{
+                "type": "text",
+                "text": CLIP_SCORING_SYSTEM,
+                # D1 : TTL explicite (1h) — ce prompt système est identique pour
+                # toutes les vidéos de tous les utilisateurs, appelé en continu ;
+                # le TTL court par défaut (5 min) expirerait entre deux vidéos
+                # traitées à quelques minutes d'écart, perdant le bénéfice du cache.
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            }],
+            messages=[{"role": "user", "content": user_message}],
+        )
+        _record_usage(usage_sink, "claude-sonnet-4-5", response)
+        raw = response.content[0].text.strip()
+    except Exception as exc:
+        print(f"[select_clips_with_llm] appel Claude échoué, repli automatique : {exc}", flush=True)
+        raw = ""
     start_idx = raw.find("[")
     end_idx = raw.rfind("]")
 
