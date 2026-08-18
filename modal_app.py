@@ -2171,7 +2171,7 @@ def process():
                 # Pour YouTube, la durée n'est pas connue côté client : le
                 # contrôle (plafond + solde) est fait dans process_video avant
                 # tout traitement coûteux.
-                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset, authorization_origin=authorization_origin, authorization_detail=authorization_detail)
+                process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset, authorization_origin=authorization_origin, authorization_detail=authorization_detail, audio_background=audio_background, audio_background_color=audio_background_color, cover_image_path=cover_image_path)
                 return {"status": "processing_started", "sourcePath": source_path}
 
             process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset, authorization_origin=authorization_origin, authorization_detail=authorization_detail, audio_background=audio_background, audio_background_color=audio_background_color, cover_image_path=cover_image_path)

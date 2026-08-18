@@ -97,9 +97,16 @@
       </div>
 
       <div style="display:flex;gap:10px;align-items:center;background:#17171d;border:1px solid #2a2a35;border-radius:9999px;padding:6px 6px 6px 20px;margin-bottom:10px;">
-        <input id="youtube-url" style="flex:1;background:transparent;border:none;color:#d1d5db;font-size:14px;outline:none;" placeholder="Colle le lien de ta propre vidéo YouTube" />
+        <input id="youtube-url" style="flex:1;background:transparent;border:none;color:#d1d5db;font-size:14px;outline:none;" placeholder="Colle le lien de ta propre vidéo YouTube, ou d'un épisode audio (flux RSS...)" />
         <button id="youtube-submit" style="background:#20202a;border:1px solid #3a3a48;color:#fff;font-weight:700;font-size:13px;padding:11px 22px;border-radius:9999px;white-space:nowrap;cursor:pointer;">Utiliser ce lien</button>
       </div>
+      <!-- Impossible de savoir depuis une simple URL si elle pointe vers de
+           l'audio pur (contrairement à un fichier importé, dont le
+           navigateur connaît le type MIME) — on demande donc explicitement. -->
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#9ca3af;margin-bottom:10px;cursor:pointer;">
+        <input type="checkbox" id="link-is-audio-podcast" style="accent-color:#8b5cf6;" />
+        Ce lien pointe vers un épisode audio (pas de vidéo)
+      </label>
       <div style="font-size:11px;color:#6b7280;line-height:1.6;">Import par lien : <strong style="color:#9ca3af;">expérimental, selon disponibilité de la plateforme source</strong>. Réservé aux vidéos dont vous êtes propriétaire ou titulaire des droits (ex. votre propre podcast). Voir nos <a href="cgu.html" style="color:#9ca3af;text-decoration:underline;">Conditions d'utilisation</a>.</div>
 
       <!-- Message spécifique au blocage anti-robot YouTube -->
@@ -447,6 +454,7 @@
     audioBackgroundRadios.forEach(r => { r.disabled = busy; });
     audioBackgroundColorInput.disabled = busy;
     audioCoverUploadInput.disabled = busy;
+    linkIsAudioPodcast.disabled = busy;
   }
 
   // Garde-fou produit obligatoire : origine de l'autorisation (voir bloc HTML
@@ -516,6 +524,17 @@
     selectedCoverFile = audioCoverUploadInput.files[0] || null;
     audioCoverFilename.textContent = selectedCoverFile ? selectedCoverFile.name : 'Choisir une image de couverture (JPG, PNG)';
     audioBackgroundError.style.display = 'none';
+  });
+
+  // Import par LIEN (pas de fichier local -> pas de type MIME à lire) : on
+  // demande explicitement si le lien pointe vers de l'audio pur, pour
+  // afficher le même choix de fond que pour un fichier importé.
+  const linkIsAudioPodcast = document.getElementById('link-is-audio-podcast');
+  linkIsAudioPodcast.addEventListener('change', () => {
+    audioBackgroundBox.style.display = linkIsAudioPodcast.checked ? 'block' : 'none';
+    if (linkIsAudioPodcast.checked) {
+      audioBackgroundBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
   });
 
   function getAudioBackground() {
@@ -645,12 +664,26 @@
     hideYoutubeError();
 
     if (!validateAuthorizationOrGuide()) return;
+    if (linkIsAudioPodcast.checked && !validateAudioBackgroundOrGuide()) return;
 
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) {
       showUploadStatus('Crée un compte gratuit pour utiliser un lien YouTube.', '#fca5a5');
       window.location.href = 'signup.html';
       return;
+    }
+
+    // Image de couverture (fond "cover" d'un épisode audio importé par lien) :
+    // même upload séparé que pour un fichier local.
+    let coverImagePath;
+    const { mode: audioBackground, color: audioBackgroundColor } = getAudioBackground();
+    if (linkIsAudioPodcast.checked && audioBackground === 'cover' && selectedCoverFile) {
+      coverImagePath = `${session.user.id}/cover_${Date.now()}_${selectedCoverFile.name}`;
+      const { error: coverError } = await supabase.storage.from('videos').upload(coverImagePath, selectedCoverFile);
+      if (coverError) {
+        showUploadStatus(`Échec de l'import de l'image de couverture : ${coverError.message}`, '#fca5a5');
+        return;
+      }
     }
 
     lastYoutubeUrl = url;
@@ -663,7 +696,11 @@
       return;
     }
     const { origin: authorizationOrigin, detail: authorizationDetail } = getAuthorization();
-    await startProcessing({ youtubeUrl: url, subtitleStyle: getSubtitleStyle(), preset: getPreset(), authorizationOrigin, authorizationDetail }, freshToken);
+    await startProcessing({
+      youtubeUrl: url, subtitleStyle: getSubtitleStyle(), preset: getPreset(),
+      authorizationOrigin, authorizationDetail,
+      ...(linkIsAudioPodcast.checked ? { audioBackground, audioBackgroundColor, coverImagePath } : {}),
+    }, freshToken);
   }
 
   youtubeSubmitBtn.addEventListener('click', () => runYoutube(youtubeUrlInput.value.trim()));
