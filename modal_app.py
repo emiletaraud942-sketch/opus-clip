@@ -1647,7 +1647,14 @@ def render_clip(source_path: str, clip: dict, words: list, style: dict, resoluti
             )
         filter_complex += "[outv]"
 
-        subprocess.run([
+        # Bug réel rencontré : `check=True` sans jamais lire `.stderr` sur
+        # l'exception fait remonter "returned non-zero exit status 1" sans
+        # AUCUN détail — impossible de diagnostiquer quoi que ce soit sur
+        # cette seule ligne (vécu : plusieurs allers-retours pour un message
+        # d'erreur qu'un simple print aurait donné du premier coup). On
+        # capture nous-mêmes et on inclut le vrai message ffmpeg dans
+        # l'exception levée, comme le fait déjà le moteur EDL (sortclip.compile.render).
+        result = subprocess.run([
             "ffmpeg", "-y",
             "-i", source_path,
             "-filter_complex", filter_complex,
@@ -1658,7 +1665,9 @@ def render_clip(source_path: str, clip: dict, words: list, style: dict, resoluti
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             out_path,
-        ], check=True, capture_output=True)
+        ], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"rendu de repli échoué : {result.stderr[-800:]}")
 
 
 # Colonnes indispensables : jamais retirées, même si l'insertion se plaint.
