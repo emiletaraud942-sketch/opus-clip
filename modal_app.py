@@ -331,13 +331,32 @@ def has_video_stream(path: str) -> bool:
     """Détecte un podcast audio pur (mp3/wav/m4a...) : aucune piste vidéo à
     recadrer. Le moteur EDL (sortclip) suppose toujours une image source à
     découper — sans piste vidéo, il faut en fabriquer une avant de rentrer
-    dans le pipeline normal (voir build_audio_background_video)."""
+    dans le pipeline normal (voir build_audio_background_video).
+
+    Bug réel rencontré : un simple flux vidéo (index) ne suffit pas — un
+    MP3/M4A avec pochette embarquée (le cas quasi systématique pour un
+    podcast exporté) contient un flux vidéo une seule image (disposition
+    "attached_pic"), que ffprobe rapporte comme un vrai flux vidéo. Ce fichier
+    passait alors à tort par le pipeline vidéo normal, qui tente de découper
+    cette image fixe à des instants différents pour chaque clip — échec
+    ffmpeg garanti sur CHAQUE clip. On exclut donc explicitement les flux
+    marqués "attached_pic" : seul un vrai flux vidéo avec plusieurs images
+    compte."""
+    # Sortie JSON (pas CSV) : la disposition est un sous-objet par flux, plus
+    # sûr à lire sans ambiguïté de colonnes qu'un format tabulaire ici.
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
-         "stream=index", "-of", "csv=p=0", path],
+         "stream=index:stream_disposition=attached_pic", "-of", "json", path],
         capture_output=True, text=True, check=True,
     )
-    return bool(result.stdout.strip())
+    try:
+        streams = json.loads(result.stdout or "{}").get("streams", [])
+    except json.JSONDecodeError:
+        streams = []
+    return any(
+        not (s.get("disposition") or {}).get("attached_pic")
+        for s in streams
+    )
 
 
 # Fonds disponibles pour un podcast audio pur, à la demande de l'utilisateur
