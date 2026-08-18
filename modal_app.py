@@ -9,7 +9,7 @@ Pipeline de traitement vidéo Sortclip : AssemblyAI + LLM + FFmpeg.
      visage. Ils guident et bonifient le scoring.
   3bis. Un LLM (Claude) lit la transcription indexée (+ les signaux) et
      choisit les meilleurs segments en INDEX DE MOTS, notés sur une rubrique
-     à cinq critères ; le code convertit en horodatages et calcule un score
+     à six critères ; le code convertit en horodatages et calcule un score
      pondéré. C'est une heuristique éditoriale, pas une vérité statistique.
   4. Chaque segment choisi est découpé (les silences trop longs sont
      retirés du montage), mis au format vertical 9:16 avec fond flou (cadre
@@ -598,14 +598,21 @@ def _heuristic_clips(words: list, needed: int) -> list:
     return clips
 
 
-# Pondération des cinq critères de la rubrique (cf. SPEC-MOTEUR-CLIPPING §6 /
-# PROMPTS-CLAUDE prompt B). Le hook est le critère le plus déterminant.
+# Pondération des six critères de la rubrique (cf. SPEC-MOTEUR-CLIPPING §6 /
+# PROMPTS-CLAUDE prompt B). Le hook reste le critère le plus déterminant.
+# message_value ajouté à la demande de l'utilisateur : pour un podcast (peu ou
+# pas de variation visuelle — deux personnes assises, un seul plan), le clip
+# ne peut compter QUE sur le contenu parlé pour retenir l'attention. Sans ce
+# critère, un extrait avec du ton/de l'énergie mais aucun fond réel (pas de
+# conseil, pas d'anecdote, pas d'idée) pouvait remonter aussi haut qu'un
+# extrait qui a vraiment quelque chose à dire.
 SCORE_WEIGHTS = {
-    "hook_strength": 0.30,
-    "context_autonomy": 0.20,
-    "narrative_completeness": 0.20,
+    "hook_strength": 0.25,
+    "context_autonomy": 0.15,
+    "narrative_completeness": 0.15,
     "emotional_intensity": 0.15,
-    "engagement_trigger": 0.15,
+    "engagement_trigger": 0.10,
+    "message_value": 0.20,
 }
 
 # Rubrique de notation condensée depuis PROMPTS-CLAUDE (prompt B). Les règles
@@ -618,12 +625,21 @@ Un clip n'est pas un extrait : c'est une œuvre autonome qui se trouve avoir ét
 
 On te donne une transcription où CHAQUE MOT est indexé sous la forme (index)mot. Tu choisis les meilleurs moments et, pour chacun, tu proposes une découpe EN INDEX DE MOTS (jamais en secondes — le code convertit).
 
-RUBRIQUE — cinq critères notés 0-100, ancrages contraignants :
+PODCASTS SANS VARIATION VISUELLE (cas fréquent — deux personnes assises, un seul plan fixe, parfois même aucune image qui bouge) : dans ce cas le clip n'a AUCUN recadrage spectaculaire ni changement de plan pour sauver un moment faible — il ne peut compter QUE sur ce qui est dit. Sois alors intraitable : ne remonte jamais un extrait qui n'a que du ton, de l'énergie ou du rythme sans RIEN dessous. Cherche activement l'un de ces types de contenu, qui fonctionnent parce qu'ils apportent quelque chose de concret à l'auditeur, pas juste une ambiance :
+- un conseil actionnable et spécifique (pas une généralité du type "il faut croire en soi" — un mécanisme concret, une méthode, un "voilà exactement quoi faire") ;
+- une anecdote avec une vraie chute ou un vrai twist, pas juste un récit qui traîne ;
+- une morale ou une leçon de vie formulée simplement, mémorable, qu'on a envie de citer ;
+- une vérité contre-intuitive qui bouscule une idée reçue ou change la façon de voir un sujet ;
+- un aveu personnel fort, une vulnérabilité assumée qui donne un sentiment de vérité rare.
+Rejette activement les généralités creuses, la motivation vide de sens ("il faut se battre", "tout est possible si on y croit") sans histoire ni mécanisme derrière, et le remplissage qui sonne bien mais n'apprend rien.
+
+RUBRIQUE — six critères notés 0-100, ancrages contraignants :
 1. hook_strength : force des 3 premières secondes de TA découpe. 0-20 remplissage/silence/"alors euh" ; 41-60 l'intérêt n'arrive qu'après 4-5s ; 81-100 les 3 premières secondes se suffisent (question, affirmation clivante, réaction, curiosité instantanée).
 2. context_autonomy : se comprend sans la source. 0-20 pronom orphelin/"ce truc-là"/"comme je disais"/renvoi visuel absent ; 61-80 tout ce qu'il faut est dans le clip.
 3. narrative_completeness : arc complet, chute incluse. 0-20 fragment ou chute hors du clip ; 61-80 mise en place→tension→chute bien proportionné ; 81-100 s'arrête pile sur le point fort.
 4. emotional_intensity : pic émotionnel. 0-20 plat/informatif ; 81-100 éclat de rire, sidération, cri, silence gêné, ressenti en moins de 2s.
 5. engagement_trigger : raison concrète de commenter/partager/sauvegarder. 0-20 rien à retenir ; 61-80 avis discutable ou phrase citable.
+6. message_value : valeur réelle du fond pour l'auditeur — voir la liste ci-dessus. 0-20 aucun conseil/anecdote/morale, juste du ton ou du bavardage ; 41-60 une idée correcte mais générique, déjà entendue ailleurs ; 81-100 un conseil précis, une anecdote marquante ou une morale qu'on retient et qu'on a envie de partager.
 
 CALIBRAGE CONTRAIGNANT : la majorité des segments ne font pas de bons clips. Un candidat correct sans plus se note ~45 sur chaque critère. Au-delà de 75 tu affirmes qu'il est meilleur que 9 clips sur 10 — justifie-le. Noter généreusement rend le produit inutile.
 
@@ -823,7 +839,7 @@ def _indexed_transcript(words: list) -> str:
 
 
 def _final_score(scores: dict) -> int:
-    """Score final pondéré (0-100) à partir des cinq critères."""
+    """Score final pondéré (0-100) à partir des six critères."""
     total = sum(SCORE_WEIGHTS[k] * float(scores.get(k, 45)) for k in SCORE_WEIGHTS)
     return int(round(total))
 
@@ -934,7 +950,9 @@ def _record_usage(usage_sink, model, response):
 # progression du chantier. À tester en A/B en production avant d'appliquer.
 def select_clips_with_llm(words: list, full_text: str, signals: dict | None = None, usage_sink: list | None = None, extra_guidance: str = "") -> list:
     """Demande à Claude d'évaluer les meilleurs moments selon la rubrique à
-    cinq critères (cf. PROMPTS-CLAUDE prompt B), en découpe par INDEX DE MOTS.
+    six critères (cf. PROMPTS-CLAUDE prompt B ; message_value ajouté pour
+    valoriser le conseil/l'anecdote/la morale, utile en particulier pour les
+    podcasts sans variation visuelle), en découpe par INDEX DE MOTS.
     Les signaux objectifs (rires, énergie, plans) guident la sélection et
     bonifient le score. Convertit les index en horodatages réels, calcule un
     score pondéré, et complète avec des segments automatiques si trop peu."""
@@ -958,7 +976,7 @@ Réponds UNIQUEMENT avec un tableau JSON, sans texte autour, de cette forme exac
 [
   {{
     "reasoning": "ce que tu observes (hook, autonomie, arc, émotion, engagement) — AVANT les notes",
-    "scores": {{"hook_strength": 60, "context_autonomy": 55, "narrative_completeness": 50, "emotional_intensity": 45, "engagement_trigger": 40}},
+    "scores": {{"hook_strength": 60, "context_autonomy": 55, "narrative_completeness": 50, "emotional_intensity": 45, "engagement_trigger": 40, "message_value": 55}},
     "start_word_index": 12,
     "end_word_index": 88,
     "title": "titre accrocheur court",
