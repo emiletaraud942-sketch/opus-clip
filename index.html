@@ -60,12 +60,31 @@
       <label for="video-upload" style="display:flex;align-items:center;gap:12px;background:#17171d;border:1px dashed #3a3a48;border-radius:16px;padding:18px 20px;margin-bottom:12px;cursor:pointer;">
         <div style="width:36px;height:36px;background:rgba(244,63,142,.12);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">⬆️</div>
         <div style="flex:1;">
-          <div style="font-size:14px;font-weight:700;">Importer un fichier vidéo</div>
-          <div style="font-size:12px;color:#9ca3af;" id="upload-filename">MP4, MOV — depuis votre ordinateur</div>
+          <div style="font-size:14px;font-weight:700;">Importer un fichier vidéo ou audio</div>
+          <div style="font-size:12px;color:#9ca3af;" id="upload-filename">MP4, MOV, MP3, WAV — depuis votre ordinateur</div>
         </div>
         <span style="background:#f43f8e;color:#fff;font-weight:700;font-size:13px;padding:11px 22px;border-radius:9999px;white-space:nowrap;">Choisir un fichier</span>
-        <input id="video-upload" type="file" accept="video/*" style="display:none;" />
+        <input id="video-upload" type="file" accept="video/*,audio/*" style="display:none;" />
       </label>
+
+      <!-- Podcast audio pur (mp3/wav/m4a...) : aucune image à recadrer, il
+           faut un fond visuel derrière les sous-titres. N'apparaît que si le
+           fichier choisi est détecté comme audio (voir isAudioFile). -->
+      <div id="audio-background-box" style="display:none;background:#17171d;border:1px solid #2a2a35;border-radius:16px;padding:16px 18px;margin-bottom:12px;">
+        <div style="font-size:13px;font-weight:700;margin-bottom:2px;">Fichier audio détecté — quel fond derrière les sous-titres ?</div>
+        <div style="font-size:11px;color:#9ca3af;margin-bottom:10px;">Il n'y a pas d'image à recadrer dans un podcast audio : on en fabrique une.</div>
+        <div style="display:flex;flex-direction:column;gap:8px;font-size:13px;color:#d1d5db;">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="radio" name="audio-background-mode" value="solid" checked style="accent-color:#8b5cf6;"> Fond de couleur unie</label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="radio" name="audio-background-mode" value="cover" style="accent-color:#8b5cf6;"> Image de couverture (ex: jaquette du podcast)</label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="radio" name="audio-background-mode" value="waveform" style="accent-color:#8b5cf6;"> Onde audio animée</label>
+        </div>
+        <input id="audio-background-color" type="color" value="#8b5cf6" style="display:block;margin-top:10px;width:60px;height:32px;background:#0f0f14;border:1px solid #2a2a35;border-radius:8px;cursor:pointer;" />
+        <label id="audio-cover-label" for="audio-cover-upload" style="display:none;margin-top:10px;align-items:center;gap:10px;background:#0f0f14;border:1px dashed #3a3a48;border-radius:10px;padding:10px 12px;cursor:pointer;">
+          <span style="font-size:12px;color:#9ca3af;" id="audio-cover-filename">Choisir une image de couverture (JPG, PNG)</span>
+          <input id="audio-cover-upload" type="file" accept="image/*" style="display:none;" />
+        </label>
+        <div id="audio-background-error" style="display:none;color:#fca5a5;font-size:11px;margin-top:6px;"></div>
+      </div>
 
       <div id="upload-status" style="display:none;font-size:12px;margin-bottom:12px;"></div>
 
@@ -386,17 +405,28 @@
     uploadStatus.style.display = 'block';
   }
 
-  // Lit la durée (secondes) d'un fichier vidéo local via une balise <video>.
+  // Podcast audio pur (mp3/wav/m4a...) : détecté par le type MIME du
+  // navigateur — un simple indice pour adapter l'INTERFACE (afficher le choix
+  // de fond), jamais une preuve ; le serveur revérifie réellement avec
+  // ffprobe une fois le fichier téléchargé (voir has_video_stream côté
+  // modal_app.py) avant de décider quoi que ce soit.
+  function isAudioFile(file) {
+    return (file.type || '').startsWith('audio/');
+  }
+
+  // Lit la durée (secondes) d'un fichier vidéo OU audio local, via une balise
+  // <video>/<audio> selon le type — les deux exposent la même API
+  // `loadedmetadata`/`duration`.
   function readVideoDuration(file) {
     return new Promise((resolve, reject) => {
-      const video = document.createElement('video');
-      video.preload = 'metadata';
-      video.onloadedmetadata = () => {
-        URL.revokeObjectURL(video.src);
-        resolve(Number.isFinite(video.duration) ? video.duration : null);
+      const media = document.createElement(isAudioFile(file) ? 'audio' : 'video');
+      media.preload = 'metadata';
+      media.onloadedmetadata = () => {
+        URL.revokeObjectURL(media.src);
+        resolve(Number.isFinite(media.duration) ? media.duration : null);
       };
-      video.onerror = () => { URL.revokeObjectURL(video.src); reject(new Error('metadata')); };
-      video.src = URL.createObjectURL(file);
+      media.onerror = () => { URL.revokeObjectURL(media.src); reject(new Error('metadata')); };
+      media.src = URL.createObjectURL(file);
     });
   }
 
@@ -414,6 +444,9 @@
     youtubeSubmitBtn.style.cursor = busy ? 'not-allowed' : 'pointer';
     authOriginRadios.forEach(r => { r.disabled = busy; });
     authDetailInput.disabled = busy;
+    audioBackgroundRadios.forEach(r => { r.disabled = busy; });
+    audioBackgroundColorInput.disabled = busy;
+    audioCoverUploadInput.disabled = busy;
   }
 
   // Garde-fou produit obligatoire : origine de l'autorisation (voir bloc HTML
@@ -458,6 +491,50 @@
     return true;
   }
 
+  // Fond visuel d'un podcast audio pur (voir bloc HTML "audio-background-box")
+  // — trois choix proposés à l'utilisateur : couleur unie, image de
+  // couverture, ou onde audio animée. Mêmes valeurs que AUTHORIZATION_ORIGINS
+  // au-dessus : liste fermée, revalidée côté serveur.
+  const audioBackgroundBox = document.getElementById('audio-background-box');
+  const audioBackgroundRadios = document.querySelectorAll('input[name="audio-background-mode"]');
+  const audioBackgroundColorInput = document.getElementById('audio-background-color');
+  const audioCoverLabel = document.getElementById('audio-cover-label');
+  const audioCoverUploadInput = document.getElementById('audio-cover-upload');
+  const audioCoverFilename = document.getElementById('audio-cover-filename');
+  const audioBackgroundError = document.getElementById('audio-background-error');
+  let selectedCoverFile = null;
+
+  function updateAudioCoverVisibility() {
+    const mode = document.querySelector('input[name="audio-background-mode"]:checked')?.value;
+    audioCoverLabel.style.display = mode === 'cover' ? 'flex' : 'none';
+    audioBackgroundError.style.display = 'none';
+  }
+  audioBackgroundRadios.forEach(r => r.addEventListener('change', updateAudioCoverVisibility));
+  updateAudioCoverVisibility();
+
+  audioCoverUploadInput.addEventListener('change', () => {
+    selectedCoverFile = audioCoverUploadInput.files[0] || null;
+    audioCoverFilename.textContent = selectedCoverFile ? selectedCoverFile.name : 'Choisir une image de couverture (JPG, PNG)';
+    audioBackgroundError.style.display = 'none';
+  });
+
+  function getAudioBackground() {
+    const mode = document.querySelector('input[name="audio-background-mode"]:checked')?.value || 'solid';
+    return { mode, color: audioBackgroundColorInput.value };
+  }
+
+  // Bloque si "image de couverture" est choisi sans image sélectionnée —
+  // seulement pertinent quand le fichier importé est détecté comme audio.
+  function validateAudioBackgroundOrGuide() {
+    const { mode } = getAudioBackground();
+    if (mode === 'cover' && !selectedCoverFile) {
+      audioBackgroundError.style.display = 'block';
+      audioBackgroundError.textContent = 'Choisis une image de couverture, ou change de fond.';
+      return false;
+    }
+    return true;
+  }
+
   const MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 Go
 
   function getSubtitleStyle() {
@@ -485,9 +562,17 @@
 
     document.getElementById('upload-filename').textContent = file.name;
 
+    // Podcast audio pur : affiche le choix de fond visuel (voir
+    // isAudioFile/audio-background-box) — masqué pour un fichier vidéo.
+    const isAudio = isAudioFile(file);
+    audioBackgroundBox.style.display = isAudio ? 'block' : 'none';
+
     if (!validateAuthorizationOrGuide()) {
       videoUploadInput.value = '';
       return;
+    }
+    if (isAudio && !validateAudioBackgroundOrGuide()) {
+      return;   // on ne vide pas l'input : l'utilisateur choisit juste une image ou change de fond
     }
 
     // Durée lue côté client (indice pour le contrôle de quota synchrone : on
@@ -514,6 +599,20 @@
       return;
     }
 
+    // Image de couverture (fond "cover" d'un podcast audio) : upload séparé,
+    // dans le même bucket que la source — le serveur va la rechercher là.
+    let coverImagePath;
+    const { mode: audioBackground, color: audioBackgroundColor } = getAudioBackground();
+    if (isAudio && audioBackground === 'cover' && selectedCoverFile) {
+      coverImagePath = `${session.user.id}/cover_${Date.now()}_${selectedCoverFile.name}`;
+      const { error: coverError } = await supabase.storage.from('videos').upload(coverImagePath, selectedCoverFile);
+      if (coverError) {
+        showUploadStatus(`Échec de l'import de l'image de couverture : ${coverError.message}`, '#fca5a5');
+        setBusy(false);
+        return;
+      }
+    }
+
     showUploadStatus('Vidéo importée, lancement du traitement IA...', '#9ca3af');
     const freshToken = await getFreshAccessToken();
     if (!freshToken) {
@@ -523,7 +622,11 @@
     }
     lastYoutubeUrl = null;   // la dernière soumission est un upload, pas un lien
     const { origin: authorizationOrigin, detail: authorizationDetail } = getAuthorization();
-    await startProcessing({ path, subtitleStyle: getSubtitleStyle(), sourceDurationSeconds, preset: getPreset(), authorizationOrigin, authorizationDetail }, freshToken);
+    await startProcessing({
+      path, subtitleStyle: getSubtitleStyle(), sourceDurationSeconds, preset: getPreset(),
+      authorizationOrigin, authorizationDetail,
+      audioBackground, audioBackgroundColor, coverImagePath,
+    }, freshToken);
   });
 
   // Dernier lien YouTube soumis (null si la dernière soumission était un upload).

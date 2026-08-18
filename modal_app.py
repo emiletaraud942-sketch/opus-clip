@@ -327,6 +327,78 @@ def has_audio_stream(video_path: str) -> bool:
     return bool(result.stdout.strip())
 
 
+def has_video_stream(path: str) -> bool:
+    """Détecte un podcast audio pur (mp3/wav/m4a...) : aucune piste vidéo à
+    recadrer. Le moteur EDL (sortclip) suppose toujours une image source à
+    découper — sans piste vidéo, il faut en fabriquer une avant de rentrer
+    dans le pipeline normal (voir build_audio_background_video)."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
+         "stream=index", "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=True,
+    )
+    return bool(result.stdout.strip())
+
+
+# Fonds disponibles pour un podcast audio pur, à la demande de l'utilisateur
+# ("fais choisir l'utilisateur entre les trois propositions") — choisi à
+# l'upload, transmis par le front (payload.get("audioBackground")).
+AUDIO_BACKGROUND_MODES = {"solid", "cover", "waveform"}
+
+
+def build_audio_background_video(audio_path: str, out_path: str, width: int, height: int,
+                                 mode: str, color: str = "#8b5cf6",
+                                 cover_image_path: str | None = None, fps: int = 30) -> None:
+    """Fabrique une vidéo (durée = celle de l'audio) à partir d'un podcast
+    audio pur, pour que le reste du pipeline (qui suppose toujours une piste
+    vidéo à recadrer) fonctionne sans changement. Trois fonds possibles :
+    - "solid"    : couleur unie (`color`, hex).
+    - "cover"    : image fixe fournie par l'utilisateur, recadrée pour
+                   remplir tout le cadre (jamais de bandes noires).
+    - "waveform" : visualisation animée du volume audio (filtre ffmpeg
+                   natif `showwaves`), plus vivant qu'un fond figé.
+    Lève une exception si ffmpeg échoue — l'appelant décide du repli
+    (aucune tentative de deviner un fond par défaut ici : un échec doit être
+    visible, pas silencieusement remplacé par autre chose)."""
+    if mode == "cover" and cover_image_path:
+        cmd = [
+            "ffmpeg", "-y", "-loop", "1", "-i", cover_image_path, "-i", audio_path,
+            "-vf", (
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},setsar=1,fps={fps}"
+            ),
+            "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", out_path,
+        ]
+    elif mode == "waveform":
+        cmd = [
+            "ffmpeg", "-y", "-i", audio_path,
+            "-filter_complex", (
+                f"[0:a]showwaves=s={width}x{height}:mode=cline:colors={_hex_to_ffmpeg_rgb(color)},"
+                f"format=yuv420p,fps={fps}[v]"
+            ),
+            "-map", "[v]", "-map", "0:a",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", out_path,
+        ]
+    else:  # "solid", ou repli si "cover" demandé sans image fournie
+        cmd = [
+            "ffmpeg", "-y", "-f", "lavfi",
+            "-i", f"color=c={_hex_to_ffmpeg_rgb(color)}:s={width}x{height}:r={fps}",
+            "-i", audio_path,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", out_path,
+        ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
+def _hex_to_ffmpeg_rgb(color: str) -> str:
+    """#RRGGBB -> 0xRRGGBB (format couleur ffmpeg). Repli violet de marque
+    si la valeur est invalide (jamais bloquant sur un simple fond)."""
+    h = (color or "").lstrip("#")
+    if len(h) != 6 or any(c not in "0123456789abcdefABCDEF" for c in h):
+        h = "8b5cf6"
+    return f"0x{h}"
+
+
 def get_video_duration(video_path: str) -> float:
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -1617,7 +1689,7 @@ def _insert_clips_resilient(supabase, rows: list):
 
 
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=2400)
-def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False, preset: str | None = None, authorization_origin: str | None = None, authorization_detail: str | None = None):
+def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False, preset: str | None = None, authorization_origin: str | None = None, authorization_detail: str | None = None, audio_background: str = "solid", audio_background_color: str = "#8b5cf6", cover_image_path: str | None = None):
     style = resolve_subtitle_style(subtitle_style, preset=preset)
     supabase = get_supabase_client()
     plan = get_user_plan(supabase, user_id)
@@ -1678,6 +1750,38 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             else:
                 video_bytes = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
                 Path(local_video).write_bytes(video_bytes)
+
+            # Podcast audio pur (mp3/wav/m4a...) : le moteur EDL suppose
+            # toujours une image source à recadrer — sans piste vidéo, rien à
+            # découper. On fabrique une vidéo (fond choisi par l'utilisateur à
+            # l'upload) AVANT le reste du pipeline, qui continue alors
+            # exactement comme pour un fichier vidéo normal. Détection par
+            # ffprobe (pas par extension/MIME, qui ne prouvent rien de fiable
+            # une fois le fichier téléchargé).
+            try:
+                is_audio_only = not has_video_stream(local_video)
+            except Exception as exc:
+                print(f"[process_video] détection piste vidéo échouée (traité comme vidéo) : {exc}")
+                is_audio_only = False
+            if is_audio_only:
+                canvas_w, canvas_h = OUTPUT_RESOLUTIONS[PLAN_MAX_RESOLUTION[plan]]
+                audio_source = local_video
+                local_video = os.path.join(tmp, "audio_background.mp4")
+                cover_local = None
+                if audio_background == "cover" and cover_image_path:
+                    try:
+                        cover_local = os.path.join(tmp, "cover" + Path(cover_image_path).suffix)
+                        Path(cover_local).write_bytes(
+                            supabase.storage.from_(SOURCE_BUCKET).download(cover_image_path)
+                        )
+                    except Exception as exc:
+                        print(f"[process_video] image de couverture indisponible, repli sur fond uni : {exc}")
+                        cover_local = None
+                build_audio_background_video(
+                    audio_source, local_video, canvas_w, canvas_h,
+                    mode=audio_background if (audio_background != "cover" or cover_local) else "solid",
+                    color=audio_background_color, cover_image_path=cover_local,
+                )
 
             # Durée réelle et autoritaire de la source téléchargée.
             duration = get_video_duration(local_video)
@@ -1978,6 +2082,27 @@ def process():
                 return auth_check
             authorization_origin, authorization_detail = auth_check
 
+            # Podcast audio pur (mp3/wav/m4a...) : fond visuel choisi par
+            # l'utilisateur à l'upload, requis SEULEMENT si le fichier s'avère
+            # sans piste vidéo une fois téléchargé (process_video vérifie
+            # réellement avec ffprobe — le MIME type côté navigateur n'est
+            # qu'un indice, jamais une preuve). Valeur par défaut "solid" si
+            # non précisé, pour ne jamais bloquer un import simplement parce
+            # que ce champ est absent (ex: anciens clients du endpoint).
+            audio_background = (payload.get("audioBackground") or "solid").strip()
+            if audio_background not in AUDIO_BACKGROUND_MODES:
+                return JSONResponse(
+                    {"error": "Fond audio invalide."}, status_code=400,
+                )
+            audio_background_color = (payload.get("audioBackgroundColor") or "#8b5cf6").strip()
+            cover_image_path = payload.get("coverImagePath")
+            if audio_background == "cover":
+                if not cover_image_path or not str(cover_image_path).startswith(f"{user_id}/"):
+                    return JSONResponse(
+                        {"error": "Choisis une image de couverture pour ce fond."},
+                        status_code=400,
+                    )
+
             # Garde-fou de concurrence ET estimation de quota, réservés de façon
             # ATOMIQUE (verrou transactionnel par utilisateur côté Postgres) —
             # ferme la course entre la vérification et l'enregistrement qui
@@ -2021,7 +2146,7 @@ def process():
                 process_video.spawn(user_id=user_id, source_path=source_path, youtube_url=youtube_url, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset, authorization_origin=authorization_origin, authorization_detail=authorization_detail)
                 return {"status": "processing_started", "sourcePath": source_path}
 
-            process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset, authorization_origin=authorization_origin, authorization_detail=authorization_detail)
+            process_video.spawn(user_id=user_id, source_path=source_path, subtitle_style=subtitle_style, skip_billing=skip_billing, preset=preset, authorization_origin=authorization_origin, authorization_detail=authorization_detail, audio_background=audio_background, audio_background_color=audio_background_color, cover_image_path=cover_image_path)
             return {"status": "processing_started", "sourcePath": source_path}
         except Exception as exc:
             print(f"[handle] Erreur non gérée : {exc}")
