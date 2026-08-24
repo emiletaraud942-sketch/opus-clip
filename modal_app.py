@@ -30,6 +30,8 @@ Secrets optionnels (contournement anti-robot YouTube) :
 (L'URL Supabase et la clé anon, publiques, sont en dur dans ce fichier.)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
