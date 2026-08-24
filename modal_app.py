@@ -137,8 +137,8 @@ def _validate_authorization(payload: dict) -> tuple[str, str | None] | JSONRespo
 # Correspondance entre les produits Stripe (créés dans le dashboard) et les
 # plans internes de Sortclip.
 STRIPE_PRODUCT_TO_PLAN = {
-    "prod_UxMunMagkVFAZR": "pro",
-    "prod_UxMtXHRHDGQljE": "equipe",
+    "prod_UxMunMagkVFAZR": "equipe",
+    "prod_UxMtXHRHDGQljE": "pro",
     # Produit d'abonnement récurrent 9,99 €/mois pour le plan Starter.
     "prod_UxgpL4tLubRJHB": "starter",
 }
