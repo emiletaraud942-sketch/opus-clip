@@ -87,6 +87,12 @@
       </div>
 
       <div id="upload-status" style="display:none;font-size:12px;margin-bottom:12px;"></div>
+      <div id="progress-bar-wrap" style="display:none;margin:-6px 0 12px;">
+        <div style="height:6px;border-radius:9999px;background:#1c1c24;overflow:hidden;">
+          <div id="progress-bar-fill" style="height:100%;width:0%;border-radius:9999px;background:linear-gradient(90deg,#f43f8e,#c4b5fd);transition:width 0.6s ease;"></div>
+        </div>
+        <div id="progress-bar-label" style="font-size:11px;color:#6b7280;margin-top:6px;"></div>
+      </div>
 
       <div id="free-tier-note" style="font-size:12px;color:#6b7280;margin-bottom:20px;">Aucune carte bancaire requise · 25 min de vidéo offertes / mois</div>
 
@@ -410,6 +416,35 @@
     uploadStatus.textContent = message;
     uploadStatus.style.color = color;
     uploadStatus.style.display = 'block';
+  }
+
+  // Barre de progression : reflète `clip_jobs.stage`/`progress`, mis à jour
+  // par le pipeline côté Modal (voir _set_job_progress dans modal_app.py).
+  const STAGE_LABELS = {
+    queued: 'En attente de démarrage...',
+    download: 'Récupération de la vidéo...',
+    transcription: 'Transcription de la parole...',
+    selection: "Sélection des meilleurs moments par l'IA...",
+    rendering: 'Montage des clips...',
+    finalizing: 'Finalisation...',
+    done: 'Terminé !',
+  };
+  const progressBarWrap = document.getElementById('progress-bar-wrap');
+  const progressBarFill = document.getElementById('progress-bar-fill');
+  const progressBarLabel = document.getElementById('progress-bar-label');
+
+  function showProgressBar() {
+    progressBarWrap.style.display = 'block';
+    updateProgressBar('queued', 0);
+  }
+
+  function updateProgressBar(stage, progress) {
+    progressBarFill.style.width = `${Math.max(0, Math.min(100, progress ?? 0))}%`;
+    progressBarLabel.textContent = STAGE_LABELS[stage] ?? 'Traitement en cours...';
+  }
+
+  function hideProgressBar() {
+    progressBarWrap.style.display = 'none';
   }
 
   // Podcast audio pur (mp3/wav/m4a...) : détecté par le type MIME du
@@ -763,10 +798,12 @@
     }
 
     showUploadStatus("Analyse en cours (transcription, sélection des moments, montage) — 2 à 5 minutes...", '#9ca3af');
+    showProgressBar();
     pollForClips(data.sourcePath);
   }
 
-  const MAX_POLL_ATTEMPTS = 160; // 160 x 15s = 40 minutes max
+  const POLL_INTERVAL_MS = 5000;
+  const MAX_POLL_ATTEMPTS = 480; // 480 x 5s = 40 minutes max
 
   function pollForClips(sourcePath) {
     let attempts = 0;
@@ -775,13 +812,14 @@
       if (attempts > MAX_POLL_ATTEMPTS) {
         clearInterval(interval);
         setBusy(false);
+        hideProgressBar();
         showUploadStatus("Le traitement prend plus de temps que prévu. Réessaie plus tard ou contacte le support si le problème persiste.", '#fca5a5');
         return;
       }
 
       const { data: job } = await supabase
         .from('clip_jobs')
-        .select('status, error')
+        .select('status, error, stage, progress')
         .eq('source_path', sourcePath)
         .order('created_at', { ascending: false })
         .limit(1)
@@ -789,9 +827,12 @@
 
       if (!job) return;
 
+      updateProgressBar(job.stage, job.progress);
+
       if (job.status === 'error') {
         clearInterval(interval);
         setBusy(false);
+        hideProgressBar();
         console.error('Erreur de traitement:', job.error);
 
         // Cas particulier : blocage anti-robot YouTube → message dédié SOUS le
@@ -817,6 +858,7 @@
       if (job.status === 'done') {
         clearInterval(interval);
         setBusy(false);
+        hideProgressBar();
         const { data: clips } = await supabase
           .from('clips')
           .select('*')
@@ -826,7 +868,7 @@
         showUploadStatus(`${clips.length} clip(s) généré(s) !`, '#86efac');
         await renderClips(clips ?? []);
       }
-    }, 15000);
+    }, POLL_INTERVAL_MS);
   }
 
   async function renderClips(clips) {

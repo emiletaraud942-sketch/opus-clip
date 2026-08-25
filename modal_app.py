@@ -1718,6 +1718,17 @@ def _insert_clips_resilient(supabase, rows: list):
     ).execute()
 
 
+def _set_job_progress(supabase, source_path: str, user_id: str, stage: str, progress: int) -> None:
+    # Best-effort : ne doit jamais faire échouer le pipeline (ex. migration
+    # schema_job_progress.sql pas encore appliquée sur cette base).
+    try:
+        supabase.table("clip_jobs").update(
+            {"stage": stage, "progress": progress}
+        ).eq("source_path", source_path).eq("user_id", user_id).execute()
+    except Exception as exc:
+        print(f"[process_video] progression non mise à jour ({stage}, {progress}%) : {exc}")
+
+
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=2400)
 def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False, preset: str | None = None, authorization_origin: str | None = None, authorization_detail: str | None = None, audio_background: str = "solid", audio_background_color: str = "#8b5cf6", cover_image_path: str | None = None):
     style = resolve_subtitle_style(subtitle_style, preset=preset)
@@ -1736,6 +1747,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
     # ce spawn (AUDIT.md #2) — ne plus la réinsérer ici éviterait un doublon.
 
     try:
+        _set_job_progress(supabase, source_path, user_id, "download", 5)
         with tempfile.TemporaryDirectory() as tmp:
             local_video = os.path.join(tmp, "source.mp4")
 
@@ -1833,6 +1845,8 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     "impossible de générer des clips sans parole à transcrire."
                 )
 
+            _set_job_progress(supabase, source_path, user_id, "transcription", 20)
+
             # Réservation-débit AVANT le premier poste de coût (transcription).
             # Contrôle autoritaire du solde ici (notamment pour YouTube, sans
             # portée UX synchrone). En cas d'échec ultérieur, refund intégral.
@@ -1880,11 +1894,13 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             preset_guidance = ""
             if preset and preset in CREATOR_PRESETS:
                 preset_guidance = CREATOR_PRESETS[preset]["selection_guidance"] + "\n\n"
+            _set_job_progress(supabase, source_path, user_id, "selection", 45)
             clips = select_clips_with_llm(
                 words, full_text, signals=signals, usage_sink=usage_sink,
                 extra_guidance=preset_guidance,
             )
 
+            _set_job_progress(supabase, source_path, user_id, "rendering", 55)
             rows = []
             total_output_bytes = 0
             render_wall_start = time.time()
@@ -1951,11 +1967,19 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     # toute la vidéo : on le saute et on continue les autres.
                     print(f"[process_video] Échec du montage du clip {i}: {clip_exc}")
                     continue
+                finally:
+                    # 55% (début du rendu) -> 90% (tous les clips montés).
+                    _set_job_progress(
+                        supabase, source_path, user_id, "rendering",
+                        55 + round(35 * (i + 1) / len(clips)),
+                    )
 
             render_wall_seconds = time.time() - render_wall_start
 
             if not rows:
                 raise RuntimeError("Aucun clip n'a pu être monté avec succès pour cette vidéo.")
+
+            _set_job_progress(supabase, source_path, user_id, "finalizing", 95)
 
             # Insertion À TOUTE ÉPREUVE : si une colonne n'existe pas encore
             # (migration non appliquée sur cette base), PostgREST renvoie une
@@ -2015,7 +2039,9 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
         except Exception as tel_exc:
             print(f"[process_video] télémétrie de coût ignorée : {tel_exc}")
 
-        supabase.table("clip_jobs").update({"status": "done"}).eq("source_path", source_path).eq("user_id", user_id).execute()
+        supabase.table("clip_jobs").update(
+            {"status": "done", "stage": "done", "progress": 100}
+        ).eq("source_path", source_path).eq("user_id", user_id).execute()
     except Exception as exc:
         # Échec, quelle qu'en soit la cause : remboursement INTÉGRAL des
         # minutes réservées. Un utilisateur ne perd jamais de minutes sur un bug.
