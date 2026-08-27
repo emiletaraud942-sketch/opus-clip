@@ -9,18 +9,21 @@
 -- même (ce n'est pas bloquant), mais la source n'était alors JAMAIS
 -- conservée : impossible de retoucher/rallonger le clip ensuite.
 --
--- `MAX_UPLOAD_SIZE_BYTES` (index.html) autorise déjà 2 Go côté client — on
+-- `MAX_UPLOAD_SIZE_BYTES` (index.html) autorise 5 Go côté client — on
 -- aligne les buckets sur cette même limite pour que rien ne bloque en
 -- silence entre les deux.
 --
--- ATTENTION — ce que cette migration NE PEUT PAS garantir : sur le plan
--- Supabase gratuit, il existe aussi un plafond GLOBAL de taille de requête
--- imposé par la plateforme (indépendant de ce réglage par bucket), que
--- cette commande SQL ne peut pas changer. Si l'erreur persiste après cette
--- migration pour un gros fichier, c'est le signe qu'il faut passer sur un
--- plan Supabase supérieur (Pro) pour lever ce plafond global.
+-- ATTENTION — ce que cette migration NE PEUT PAS garantir : il existe aussi
+-- un plafond GLOBAL de taille de requête au niveau du PROJET Supabase
+-- (Dashboard > Project Settings > Storage > "Global file size limit"),
+-- indépendant de ce réglage par bucket, que cette commande SQL ne peut pas
+-- changer. Ce plafond global prime toujours sur celui-ci. Sur le plan
+-- gratuit il est généralement bloqué bas (~50 Mo) : si l'erreur persiste
+-- après cette migration pour un gros fichier, c'est le signe qu'il faut
+-- relever ce réglage dans le dashboard, ou passer sur un plan Supabase
+-- supérieur (Pro) si le plan gratuit ne permet pas de le relever assez.
 -- =====================================================================
 
 update storage.buckets
-  set file_size_limit = 2147483648   -- 2 Go, aligné sur MAX_UPLOAD_SIZE_BYTES (index.html)
+  set file_size_limit = 5368709120   -- 5 Go, aligné sur MAX_UPLOAD_SIZE_BYTES (index.html)
   where id in ('videos', 'clips');

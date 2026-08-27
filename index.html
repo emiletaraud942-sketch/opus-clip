@@ -589,7 +589,10 @@
     return true;
   }
 
-  const MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 Go
+  // 5 Go : au-delà, il faut relever le "Global file size limit" du projet
+  // Supabase (Dashboard > Project Settings > Storage), qui prime toujours
+  // sur cette limite-ci et sur celle des buckets (schema_storage_size_limit.sql).
+  const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024 * 1024; // 5 Go
 
   function getSubtitleStyle() {
     return {
@@ -609,7 +612,7 @@
     if (!file || processingInFlight) return;
 
     if (file.size > MAX_UPLOAD_SIZE_BYTES) {
-      showUploadStatus('Ce fichier dépasse la taille maximale autorisée (2 Go). Choisis une vidéo plus légère.', '#fca5a5');
+      showUploadStatus('Ce fichier dépasse la taille maximale autorisée (5 Go). Choisis une vidéo plus légère.', '#fca5a5');
       videoUploadInput.value = '';
       return;
     }
