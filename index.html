@@ -866,6 +866,13 @@
 
   function pollForClips(sourcePath) {
     let attempts = 0;
+    // Passe à true dès qu'on détecte que stage/progress ne sont pas lisibles
+    // (migration supabase/schema_job_progress.sql non exécutée) — on arrête
+    // alors d'interroger ces colonnes (inutile de réessayer 480 fois) et on
+    // masque la barre plutôt que de la laisser figée à 0% pendant 40 min,
+    // ce qui serait aussi trompeur qu'aucun retour du tout.
+    let progressColumnsMissing = false;
+
     const interval = setInterval(async () => {
       attempts += 1;
       if (attempts > MAX_POLL_ATTEMPTS) {
@@ -876,17 +883,52 @@
         return;
       }
 
-      const { data: job } = await supabase
-        .from('clip_jobs')
-        .select('status, error, stage, progress')
-        .eq('source_path', sourcePath)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      let job;
+      if (progressColumnsMissing) {
+        const { data } = await supabase
+          .from('clip_jobs')
+          .select('status, error')
+          .eq('source_path', sourcePath)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        job = data;
+      } else {
+        const { data, error } = await supabase
+          .from('clip_jobs')
+          .select('status, error, stage, progress')
+          .eq('source_path', sourcePath)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (error) {
+          // On ne reste JAMAIS silencieux : sans ces colonnes, on perd
+          // l'animation détaillée, mais la détection fin/erreur continue de
+          // marcher avec les colonnes de base.
+          console.warn('Progression indisponible (migration manquante ?) :', error);
+          progressColumnsMissing = true;
+          hideProgressBar();
+          const fallback = await supabase
+            .from('clip_jobs')
+            .select('status, error')
+            .eq('source_path', sourcePath)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          job = fallback.data;
+        } else {
+          job = data;
+        }
+      }
 
       if (!job) return;
 
-      updateProgressBar(job.stage, job.progress);
+      // job.stage n'existe que si la requête détaillée a réussi (voir repli
+      // ci-dessus) — sans lui, on garde le texte déjà affiché plutôt que
+      // d'écraser avec une barre à 0%.
+      if (job.stage !== undefined) {
+        updateProgressBar(job.stage, job.progress);
+      }
 
       if (job.status === 'error') {
         clearInterval(interval);
