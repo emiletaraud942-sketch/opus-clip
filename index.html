@@ -589,10 +589,12 @@
     return true;
   }
 
-  // 5 Go : au-delà, il faut relever le "Global file size limit" du projet
-  // Supabase (Dashboard > Project Settings > Storage), qui prime toujours
-  // sur cette limite-ci et sur celle des buckets (schema_storage_size_limit.sql).
-  const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024 * 1024; // 5 Go
+  // L'upload passe désormais par Cloudflare R2 (voir POST /upload_url), plus
+  // par Supabase Storage — cette limite n'est donc plus contrainte par le
+  // plafond de 50 Mo de Supabase. 10 Go reste une garde-fou raisonnable
+  // (au-delà, c'est surtout le plafond de durée par plan, 4h max, qui
+  // bloquera de toute façon — voir GLOBAL_MAX_SOURCE_SECONDS côté serveur).
+  const MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024 * 1024; // 10 Go
 
   function getSubtitleStyle() {
     return {
@@ -612,7 +614,7 @@
     if (!file || processingInFlight) return;
 
     if (file.size > MAX_UPLOAD_SIZE_BYTES) {
-      showUploadStatus('Ce fichier dépasse la taille maximale autorisée (5 Go). Choisis une vidéo plus légère.', '#fca5a5');
+      showUploadStatus('Ce fichier dépasse la taille maximale autorisée (10 Go). Choisis une vidéo plus légère.', '#fca5a5');
       videoUploadInput.value = '';
       return;
     }
@@ -647,17 +649,51 @@
     setBusy(true);
     showUploadStatus('Import en cours...', '#9ca3af');
 
-    const path = `${session.user.id}/${Date.now()}_${file.name}`;
-    const { error } = await supabase.storage.from('videos').upload(path, file);
-
-    if (error) {
-      showUploadStatus(`Échec de l'import : ${error.message}`, '#fca5a5');
+    const uploadToken = await getFreshAccessToken();
+    if (!uploadToken) {
+      showUploadStatus('Ta session a expiré. Reconnecte-toi puis réessaie.', '#fca5a5');
       setBusy(false);
       return;
     }
 
-    // Image de couverture (fond "cover" d'un podcast audio) : upload séparé,
-    // dans le même bucket que la source — le serveur va la rechercher là.
+    // Upload direct vers Cloudflare R2 (URL présignée) : le fichier ne
+    // transite JAMAIS par Supabase Storage, pour contourner son plafond de
+    // taille d'upload (50 Mo sur le plan gratuit, quel que soit ce qu'on
+    // configure dans le code — voir POST /upload_url côté modal_app.py).
+    const contentType = file.type || 'video/mp4';
+    let path;
+    try {
+      const urlRes = await fetch(`${MODAL_PROCESS_URL}/upload_url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${uploadToken}` },
+        body: JSON.stringify({ filename: file.name, contentType }),
+      });
+      const urlData = await urlRes.json().catch(() => ({}));
+      if (!urlRes.ok) {
+        showUploadStatus(`Échec de l'import : ${urlData.error || "URL d'upload indisponible."}`, '#fca5a5');
+        setBusy(false);
+        return;
+      }
+      const putRes = await fetch(urlData.uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': contentType },
+        body: file,
+      });
+      if (!putRes.ok) {
+        showUploadStatus("Échec de l'import : le transfert vers le stockage a échoué.", '#fca5a5');
+        setBusy(false);
+        return;
+      }
+      path = urlData.sourcePath;
+    } catch (err) {
+      console.error('Upload R2 échoué:', err);
+      showUploadStatus("Impossible d'importer ce fichier. Vérifie ta connexion et réessaie.", '#fca5a5');
+      setBusy(false);
+      return;
+    }
+
+    // Image de couverture (fond "cover" d'un podcast audio) : reste sur
+    // Supabase Storage (fichier léger, jamais concerné par le plafond).
     let coverImagePath;
     const { mode: audioBackground, color: audioBackgroundColor } = getAudioBackground();
     if (isAudio && audioBackground === 'cover' && selectedCoverFile) {
