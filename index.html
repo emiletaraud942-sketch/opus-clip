@@ -447,6 +447,34 @@
     progressBarWrap.style.display = 'none';
   }
 
+  // Upload direct vers une URL présignée (R2), avec progression réelle —
+  // fetch() ne remonte aucun événement de progression pour un body envoyé,
+  // XMLHttpRequest si. Sans ça, un gros fichier laisse l'utilisateur des
+  // minutes durant sur un message statique "Import en cours...", sans
+  // moyen de savoir si ça avance ou si c'est bloqué.
+  function uploadFileWithProgress(url, file, contentType) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', contentType);
+      xhr.timeout = 30 * 60 * 1000; // 30 min : au-delà, on considère que c'est bloqué.
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        const pct = Math.round((e.loaded / e.total) * 100);
+        progressBarWrap.style.display = 'block';
+        progressBarFill.style.width = `${pct}%`;
+        progressBarLabel.textContent = `Envoi du fichier... ${pct}%`;
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error("Échec de l'import : le transfert vers le stockage a échoué."));
+      };
+      xhr.onerror = () => reject(new Error("Impossible d'importer ce fichier. Vérifie ta connexion et réessaie."));
+      xhr.ontimeout = () => reject(new Error("L'import a pris trop de temps et a été interrompu. Réessaie."));
+      xhr.send(file);
+    });
+  }
+
   // Podcast audio pur (mp3/wav/m4a...) : détecté par le type MIME du
   // navigateur — un simple indice pour adapter l'INTERFACE (afficher le choix
   // de fond), jamais une preuve ; le serveur revérifie réellement avec
@@ -674,20 +702,12 @@
         setBusy(false);
         return;
       }
-      const putRes = await fetch(urlData.uploadUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': contentType },
-        body: file,
-      });
-      if (!putRes.ok) {
-        showUploadStatus("Échec de l'import : le transfert vers le stockage a échoué.", '#fca5a5');
-        setBusy(false);
-        return;
-      }
+      await uploadFileWithProgress(urlData.uploadUrl, file, contentType);
       path = urlData.sourcePath;
     } catch (err) {
       console.error('Upload R2 échoué:', err);
-      showUploadStatus("Impossible d'importer ce fichier. Vérifie ta connexion et réessaie.", '#fca5a5');
+      showUploadStatus(err.message || "Impossible d'importer ce fichier. Vérifie ta connexion et réessaie.", '#fca5a5');
+      hideProgressBar();
       setBusy(false);
       return;
     }
