@@ -87,6 +87,12 @@
       </div>
 
       <div id="upload-status" style="display:none;font-size:12px;margin-bottom:12px;"></div>
+      <div id="progress-bar-wrap" style="display:none;margin:-6px 0 12px;">
+        <div style="height:6px;border-radius:9999px;background:#1c1c24;overflow:hidden;">
+          <div id="progress-bar-fill" style="height:100%;width:0%;border-radius:9999px;background:linear-gradient(90deg,#f43f8e,#c4b5fd);transition:width 0.6s ease;"></div>
+        </div>
+        <div id="progress-bar-label" style="font-size:11px;color:#6b7280;margin-top:6px;"></div>
+      </div>
 
       <div id="free-tier-note" style="font-size:12px;color:#6b7280;margin-bottom:20px;">Aucune carte bancaire requise · 25 min de vidéo offertes / mois</div>
 
@@ -412,6 +418,35 @@
     uploadStatus.style.display = 'block';
   }
 
+  // Barre de progression : reflète `clip_jobs.stage`/`progress`, mis à jour
+  // par le pipeline côté Modal (voir _set_job_progress dans modal_app.py).
+  const STAGE_LABELS = {
+    queued: 'En attente de démarrage...',
+    download: 'Récupération de la vidéo...',
+    transcription: 'Transcription de la parole...',
+    selection: "Sélection des meilleurs moments par l'IA...",
+    rendering: 'Montage des clips...',
+    finalizing: 'Finalisation...',
+    done: 'Terminé !',
+  };
+  const progressBarWrap = document.getElementById('progress-bar-wrap');
+  const progressBarFill = document.getElementById('progress-bar-fill');
+  const progressBarLabel = document.getElementById('progress-bar-label');
+
+  function showProgressBar() {
+    progressBarWrap.style.display = 'block';
+    updateProgressBar('queued', 0);
+  }
+
+  function updateProgressBar(stage, progress) {
+    progressBarFill.style.width = `${Math.max(0, Math.min(100, progress ?? 0))}%`;
+    progressBarLabel.textContent = STAGE_LABELS[stage] ?? 'Traitement en cours...';
+  }
+
+  function hideProgressBar() {
+    progressBarWrap.style.display = 'none';
+  }
+
   // Podcast audio pur (mp3/wav/m4a...) : détecté par le type MIME du
   // navigateur — un simple indice pour adapter l'INTERFACE (afficher le choix
   // de fond), jamais une preuve ; le serveur revérifie réellement avec
@@ -554,7 +589,12 @@
     return true;
   }
 
-  const MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2 Go
+  // L'upload passe désormais par Cloudflare R2 (voir POST /upload_url), plus
+  // par Supabase Storage — cette limite n'est donc plus contrainte par le
+  // plafond de 50 Mo de Supabase. 10 Go reste une garde-fou raisonnable
+  // (au-delà, c'est surtout le plafond de durée par plan, 4h max, qui
+  // bloquera de toute façon — voir GLOBAL_MAX_SOURCE_SECONDS côté serveur).
+  const MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024 * 1024; // 10 Go
 
   function getSubtitleStyle() {
     return {
@@ -574,7 +614,7 @@
     if (!file || processingInFlight) return;
 
     if (file.size > MAX_UPLOAD_SIZE_BYTES) {
-      showUploadStatus('Ce fichier dépasse la taille maximale autorisée (2 Go). Choisis une vidéo plus légère.', '#fca5a5');
+      showUploadStatus('Ce fichier dépasse la taille maximale autorisée (10 Go). Choisis une vidéo plus légère.', '#fca5a5');
       videoUploadInput.value = '';
       return;
     }
@@ -609,17 +649,51 @@
     setBusy(true);
     showUploadStatus('Import en cours...', '#9ca3af');
 
-    const path = `${session.user.id}/${Date.now()}_${file.name}`;
-    const { error } = await supabase.storage.from('videos').upload(path, file);
-
-    if (error) {
-      showUploadStatus(`Échec de l'import : ${error.message}`, '#fca5a5');
+    const uploadToken = await getFreshAccessToken();
+    if (!uploadToken) {
+      showUploadStatus('Ta session a expiré. Reconnecte-toi puis réessaie.', '#fca5a5');
       setBusy(false);
       return;
     }
 
-    // Image de couverture (fond "cover" d'un podcast audio) : upload séparé,
-    // dans le même bucket que la source — le serveur va la rechercher là.
+    // Upload direct vers Cloudflare R2 (URL présignée) : le fichier ne
+    // transite JAMAIS par Supabase Storage, pour contourner son plafond de
+    // taille d'upload (50 Mo sur le plan gratuit, quel que soit ce qu'on
+    // configure dans le code — voir POST /upload_url côté modal_app.py).
+    const contentType = file.type || 'video/mp4';
+    let path;
+    try {
+      const urlRes = await fetch(`${MODAL_PROCESS_URL}/upload_url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${uploadToken}` },
+        body: JSON.stringify({ filename: file.name, contentType }),
+      });
+      const urlData = await urlRes.json().catch(() => ({}));
+      if (!urlRes.ok) {
+        showUploadStatus(`Échec de l'import : ${urlData.error || "URL d'upload indisponible."}`, '#fca5a5');
+        setBusy(false);
+        return;
+      }
+      const putRes = await fetch(urlData.uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': contentType },
+        body: file,
+      });
+      if (!putRes.ok) {
+        showUploadStatus("Échec de l'import : le transfert vers le stockage a échoué.", '#fca5a5');
+        setBusy(false);
+        return;
+      }
+      path = urlData.sourcePath;
+    } catch (err) {
+      console.error('Upload R2 échoué:', err);
+      showUploadStatus("Impossible d'importer ce fichier. Vérifie ta connexion et réessaie.", '#fca5a5');
+      setBusy(false);
+      return;
+    }
+
+    // Image de couverture (fond "cover" d'un podcast audio) : reste sur
+    // Supabase Storage (fichier léger, jamais concerné par le plafond).
     let coverImagePath;
     const { mode: audioBackground, color: audioBackgroundColor } = getAudioBackground();
     if (isAudio && audioBackground === 'cover' && selectedCoverFile) {
@@ -763,10 +837,12 @@
     }
 
     showUploadStatus("Analyse en cours (transcription, sélection des moments, montage) — 2 à 5 minutes...", '#9ca3af');
+    showProgressBar();
     pollForClips(data.sourcePath);
   }
 
-  const MAX_POLL_ATTEMPTS = 160; // 160 x 15s = 40 minutes max
+  const POLL_INTERVAL_MS = 5000;
+  const MAX_POLL_ATTEMPTS = 480; // 480 x 5s = 40 minutes max
 
   function pollForClips(sourcePath) {
     let attempts = 0;
@@ -775,13 +851,14 @@
       if (attempts > MAX_POLL_ATTEMPTS) {
         clearInterval(interval);
         setBusy(false);
+        hideProgressBar();
         showUploadStatus("Le traitement prend plus de temps que prévu. Réessaie plus tard ou contacte le support si le problème persiste.", '#fca5a5');
         return;
       }
 
       const { data: job } = await supabase
         .from('clip_jobs')
-        .select('status, error')
+        .select('status, error, stage, progress')
         .eq('source_path', sourcePath)
         .order('created_at', { ascending: false })
         .limit(1)
@@ -789,9 +866,12 @@
 
       if (!job) return;
 
+      updateProgressBar(job.stage, job.progress);
+
       if (job.status === 'error') {
         clearInterval(interval);
         setBusy(false);
+        hideProgressBar();
         console.error('Erreur de traitement:', job.error);
 
         // Cas particulier : blocage anti-robot YouTube → message dédié SOUS le
@@ -817,6 +897,7 @@
       if (job.status === 'done') {
         clearInterval(interval);
         setBusy(false);
+        hideProgressBar();
         const { data: clips } = await supabase
           .from('clips')
           .select('*')
@@ -826,7 +907,7 @@
         showUploadStatus(`${clips.length} clip(s) généré(s) !`, '#86efac');
         await renderClips(clips ?? []);
       }
-    }, 15000);
+    }, POLL_INTERVAL_MS);
   }
 
   async function renderClips(clips) {

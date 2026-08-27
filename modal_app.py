@@ -30,6 +30,8 @@ Secrets optionnels (contournement anti-robot YouTube) :
 (L'URL Supabase et la clé anon, publiques, sont en dur dans ce fichier.)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -64,6 +66,10 @@ image = (
         "numpy==1.26.4",
         "scenedetect==0.6.4",
         "opencv-python-headless==4.10.0.84",
+        # Cloudflare R2 (compatible S3) : upload direct navigateur -> R2 via
+        # URL présignée, pour contourner le plafond de taille d'upload de
+        # Supabase Storage (voir _r2_client / _download_source_to).
+        "boto3==1.35.36",
     )
     # yt-dlp installé depuis GitHub (master) : YouTube change ses protections
     # anti-robot en permanence, une version PyPI figée casse vite.
@@ -77,6 +83,39 @@ image = (
 SOURCE_BUCKET = "videos"
 CLIPS_BUCKET = "clips"
 MAX_CLIPS_PER_VIDEO = 6
+
+# Cloudflare R2 (compatible S3) : bypass du plafond de taille d'upload de
+# Supabase Storage (50 Mo sur le plan gratuit, quel que soit le plan de
+# ce dépôt) pour l'IMPORT DIRECT d'une vidéo locale. Le navigateur uploade
+# alors directement sur R2 via une URL présignée (voir l'endpoint
+# POST /upload_url), sans jamais transiter par Supabase. Un chemin source
+# R2 est repérable au préfixe "r2:" (ex: "r2:user_id/169.._clip.mp4").
+# Nécessite les secrets Modal R2_ACCOUNT_ID / R2_ACCESS_KEY_ID /
+# R2_SECRET_ACCESS_KEY / R2_BUCKET_NAME (voir README de déploiement).
+def _r2_client():
+    import boto3
+
+    return boto3.client(
+        "s3",
+        endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+        region_name="auto",
+    )
+
+
+def _download_source_to(supabase, source_path: str, local_path: str) -> None:
+    """Télécharge une source vidéo, qu'elle soit sur Supabase Storage
+    (chemin "user_id/xxx.mp4") ou sur Cloudflare R2 (chemin
+    "r2:user_id/xxx.mp4"). Point d'entrée UNIQUE pour ce téléchargement afin
+    que le contournement R2 marche partout où une source est relue
+    (traitement initial, split/extend/re-rendu d'un clip)."""
+    if source_path.startswith("r2:"):
+        key = source_path[len("r2:"):]
+        _r2_client().download_file(os.environ["R2_BUCKET_NAME"], key, local_path)
+    else:
+        data = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
+        Path(local_path).write_bytes(data)
 
 # Réalisateur LLM (cadrages/emphases auto sur chaque clip via le moteur EDL).
 # DÉSACTIVÉ par défaut : c'est un appel LLM supplémentaire par clip (~1-2 c/clip).
@@ -137,8 +176,8 @@ def _validate_authorization(payload: dict) -> tuple[str, str | None] | JSONRespo
 # Correspondance entre les produits Stripe (créés dans le dashboard) et les
 # plans internes de Sortclip.
 STRIPE_PRODUCT_TO_PLAN = {
-    "prod_UxMunMagkVFAZR": "pro",
-    "prod_UxMtXHRHDGQljE": "equipe",
+    "prod_UxMunMagkVFAZR": "equipe",
+    "prod_UxMtXHRHDGQljE": "pro",
     # Produit d'abonnement récurrent 9,99 €/mois pour le plan Starter.
     "prod_UxgpL4tLubRJHB": "starter",
 }
@@ -1716,6 +1755,17 @@ def _insert_clips_resilient(supabase, rows: list):
     ).execute()
 
 
+def _set_job_progress(supabase, source_path: str, user_id: str, stage: str, progress: int) -> None:
+    # Best-effort : ne doit jamais faire échouer le pipeline (ex. migration
+    # schema_job_progress.sql pas encore appliquée sur cette base).
+    try:
+        supabase.table("clip_jobs").update(
+            {"stage": stage, "progress": progress}
+        ).eq("source_path", source_path).eq("user_id", user_id).execute()
+    except Exception as exc:
+        print(f"[process_video] progression non mise à jour ({stage}, {progress}%) : {exc}")
+
+
 @app.function(image=image, secrets=[modal.Secret.from_name("sortclip-secrets")], timeout=2400)
 def process_video(user_id: str, source_path: str, youtube_url: str | None = None, subtitle_style: dict | None = None, skip_billing: bool = False, preset: str | None = None, authorization_origin: str | None = None, authorization_detail: str | None = None, audio_background: str = "solid", audio_background_color: str = "#8b5cf6", cover_image_path: str | None = None):
     style = resolve_subtitle_style(subtitle_style, preset=preset)
@@ -1734,6 +1784,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
     # ce spawn (AUDIT.md #2) — ne plus la réinsérer ici éviterait un doublon.
 
     try:
+        _set_job_progress(supabase, source_path, user_id, "download", 5)
         with tempfile.TemporaryDirectory() as tmp:
             local_video = os.path.join(tmp, "source.mp4")
 
@@ -1776,8 +1827,7 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     print(f"[process_video] persistance de la source YouTube échouée "
                           f"(les clips ne seront pas ajustables) : {exc}")
             else:
-                video_bytes = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
-                Path(local_video).write_bytes(video_bytes)
+                _download_source_to(supabase, source_path, local_video)
 
             # Podcast audio pur (mp3/wav/m4a...) : le moteur EDL suppose
             # toujours une image source à recadrer — sans piste vidéo, rien à
@@ -1831,6 +1881,8 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     "impossible de générer des clips sans parole à transcrire."
                 )
 
+            _set_job_progress(supabase, source_path, user_id, "transcription", 20)
+
             # Réservation-débit AVANT le premier poste de coût (transcription).
             # Contrôle autoritaire du solde ici (notamment pour YouTube, sans
             # portée UX synchrone). En cas d'échec ultérieur, refund intégral.
@@ -1878,11 +1930,13 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
             preset_guidance = ""
             if preset and preset in CREATOR_PRESETS:
                 preset_guidance = CREATOR_PRESETS[preset]["selection_guidance"] + "\n\n"
+            _set_job_progress(supabase, source_path, user_id, "selection", 45)
             clips = select_clips_with_llm(
                 words, full_text, signals=signals, usage_sink=usage_sink,
                 extra_guidance=preset_guidance,
             )
 
+            _set_job_progress(supabase, source_path, user_id, "rendering", 55)
             rows = []
             total_output_bytes = 0
             render_wall_start = time.time()
@@ -1949,11 +2003,19 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     # toute la vidéo : on le saute et on continue les autres.
                     print(f"[process_video] Échec du montage du clip {i}: {clip_exc}")
                     continue
+                finally:
+                    # 55% (début du rendu) -> 90% (tous les clips montés).
+                    _set_job_progress(
+                        supabase, source_path, user_id, "rendering",
+                        55 + round(35 * (i + 1) / len(clips)),
+                    )
 
             render_wall_seconds = time.time() - render_wall_start
 
             if not rows:
                 raise RuntimeError("Aucun clip n'a pu être monté avec succès pour cette vidéo.")
+
+            _set_job_progress(supabase, source_path, user_id, "finalizing", 95)
 
             # Insertion À TOUTE ÉPREUVE : si une colonne n'existe pas encore
             # (migration non appliquée sur cette base), PostgREST renvoie une
@@ -2013,7 +2075,9 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
         except Exception as tel_exc:
             print(f"[process_video] télémétrie de coût ignorée : {tel_exc}")
 
-        supabase.table("clip_jobs").update({"status": "done"}).eq("source_path", source_path).eq("user_id", user_id).execute()
+        supabase.table("clip_jobs").update(
+            {"status": "done", "stage": "done", "progress": 100}
+        ).eq("source_path", source_path).eq("user_id", user_id).execute()
     except Exception as exc:
         # Échec, quelle qu'en soit la cause : remboursement INTÉGRAL des
         # minutes réservées. Un utilisateur ne perd jamais de minutes sur un bug.
@@ -2099,7 +2163,11 @@ def process():
             youtube_url = payload.get("youtubeUrl")
             source_path = (f"{user_id}/youtube_{int(time.time())}" if youtube_url
                           else payload["path"])
-            if not youtube_url and not source_path.startswith(f"{user_id}/"):
+            # Un chemin R2 (voir /upload_url) porte le préfixe "r2:" avant la
+            # partie "user_id/..." — on l'ignore pour la vérification de
+            # propriété du chemin.
+            own_path = source_path[len("r2:"):] if source_path.startswith("r2:") else source_path
+            if not youtube_url and not own_path.startswith(f"{user_id}/"):
                 return JSONResponse({"error": "Chemin invalide"}, status_code=403)
 
             # Garde-fou produit obligatoire : chaque projet doit déclarer son
@@ -2178,6 +2246,44 @@ def process():
             return {"status": "processing_started", "sourcePath": source_path}
         except Exception as exc:
             print(f"[handle] Erreur non gérée : {exc}")
+            return JSONResponse({"error": f"Erreur serveur : {exc}"}, status_code=500)
+
+    @web_app.post("/upload_url")
+    async def upload_url(payload: dict, request: Request):
+        """Renvoie une URL d'upload direct vers Cloudflare R2 (PUT), pour que
+        le navigateur envoie le fichier SANS passer par Supabase Storage
+        (contourne son plafond de taille d'upload — 50 Mo sur le plan
+        gratuit, quel que soit le plan de ce dépôt).
+        Body attendu : {"filename": "video.mp4", "contentType": "video/mp4"}
+        Réponse : {"uploadUrl": "...", "sourcePath": "r2:user_id/xxx.mp4"} —
+        `sourcePath` doit être renvoyé tel quel dans le POST / suivant."""
+        try:
+            auth_header = request.headers.get("authorization", "")
+            token = auth_header.replace("Bearer ", "")
+            auth_result = verify_user_token(token)
+            if not auth_result:
+                return JSONResponse({"error": "Non authentifié"}, status_code=401)
+            user_id, _email = auth_result
+
+            filename = str(payload.get("filename") or "video.mp4")
+            # Nettoyage minimal : évite qu'un nom de fichier exotique casse la
+            # clé R2 (le nom d'origine n'est de toute façon jamais réaffiché).
+            safe_name = re.sub(r"[^\w.\-]+", "_", filename)[-200:] or "video.mp4"
+            content_type = str(payload.get("contentType") or "application/octet-stream")
+            key = f"{user_id}/{int(time.time())}_{safe_name}"
+
+            presigned_url = _r2_client().generate_presigned_url(
+                "put_object",
+                Params={
+                    "Bucket": os.environ["R2_BUCKET_NAME"],
+                    "Key": key,
+                    "ContentType": content_type,
+                },
+                ExpiresIn=3600,
+            )
+            return {"uploadUrl": presigned_url, "sourcePath": f"r2:{key}"}
+        except Exception as exc:
+            print(f"[upload_url] Erreur : {exc}")
             return JSONResponse({"error": f"Erreur serveur : {exc}"}, status_code=500)
 
     return web_app
@@ -2534,8 +2640,7 @@ def split_clip(user_id: str, clip_id: str, at_seconds: float | None = None):
 
         with tempfile.TemporaryDirectory() as tmp:
             src_local = os.path.join(tmp, "source.mp4")
-            data = supabase.storage.from_(SOURCE_BUCKET).download(row["source_path"])
-            Path(src_local).write_bytes(data)
+            _download_source_to(supabase, row["source_path"], src_local)
 
             from sortclip.compile import probe_source
             try:
@@ -2615,8 +2720,7 @@ def extend_clip(user_id: str, clip_id: str, before_seconds: float = 0.0, after_s
 
         with tempfile.TemporaryDirectory() as tmp:
             src_local = os.path.join(tmp, "source.mp4")
-            data = supabase.storage.from_(SOURCE_BUCKET).download(row["source_path"])
-            Path(src_local).write_bytes(data)
+            _download_source_to(supabase, row["source_path"], src_local)
             duration = get_video_duration(src_local)
 
             new_start = max(0.0, float(row.get("start_time") or 0) - max(0.0, before_seconds))
@@ -2699,8 +2803,7 @@ def rerender_clip(user_id: str, clip_id: str):
     try:
         with tempfile.TemporaryDirectory() as tmp:
             src = os.path.join(tmp, "source.mp4")
-            data = supabase.storage.from_(SOURCE_BUCKET).download(row["source_path"])
-            Path(src).write_bytes(data)
+            _download_source_to(supabase, row["source_path"], src)
             out = os.path.join(tmp, "clip.mp4")
             _rerender_from_edl(row["edl"], row.get("edl_words"),
                                row.get("edl_resolution") or "1080p", src, out, tmp)
@@ -3055,7 +3158,12 @@ def _list_source_files(supabase, prefix: str) -> list[dict]:
 def cleanup_old_sources():
     """Supprime du bucket « videos » les vidéos SOURCE de plus de
     RETENTION_SOURCE_DAYS jours, SAUF celles référencées par un clip protégé
-    (clips.protected = true). Les clips eux-mêmes ne sont jamais touchés ici."""
+    (clips.protected = true). Les clips eux-mêmes ne sont jamais touchés ici.
+
+    NE COUVRE PAS les sources uploadées sur Cloudflare R2 (chemins "r2:...",
+    voir /upload_url) : ce nettoyage ne connaît que le bucket Supabase. Pour
+    R2, configurer une règle de cycle de vie (auto-suppression après N jours)
+    directement dans le dashboard Cloudflare, alignée sur RETENTION_SOURCE_DAYS."""
     supabase = get_supabase_client()
     cutoff = _now() - timedelta(days=RETENTION_SOURCE_DAYS)
 

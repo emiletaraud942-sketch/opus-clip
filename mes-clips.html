@@ -181,36 +181,79 @@
     // État des générations récentes : une génération se lance en tâche de
     // fond ; si elle échoue, l'erreur est stockée dans clip_jobs mais n'était
     // jusqu'ici jamais montrée — d'où l'impression que « rien n'apparaît ».
-    try {
-      const dayAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-      const { data: jobs } = await supabase
-        .from('clip_jobs')
-        .select('status, error, created_at')
-        .eq('user_id', session.user.id)
-        .gte('created_at', dayAgo)
-        .order('created_at', { ascending: false });
-      if (jobs && jobs.length) {
-        const processing = jobs.filter(j => j.status === 'processing').length;
-        const failed = jobs.filter(j => j.status === 'error');
+    // Barre de progression alimentée par clip_jobs.stage/progress (mis à
+    // jour par _set_job_progress côté Modal) — voir index.html pour le même
+    // mécanisme sur la page d'import.
+    const JOB_STAGE_LABELS = {
+      queued: 'En attente de démarrage...',
+      download: 'Récupération de la vidéo...',
+      transcription: 'Transcription de la parole...',
+      selection: "Sélection des meilleurs moments par l'IA...",
+      rendering: 'Montage des clips...',
+      finalizing: 'Finalisation...',
+      done: 'Terminé !',
+    };
+    let jobStatusPoll = null;
+    let jobStatusSawProcessing = false;
+
+    async function refreshJobStatus() {
+      try {
+        const dayAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+        const { data: jobs } = await supabase
+          .from('clip_jobs')
+          .select('status, error, stage, progress, created_at')
+          .eq('user_id', session.user.id)
+          .gte('created_at', dayAgo)
+          .order('created_at', { ascending: false });
+
         const box = document.getElementById('job-status');
+        if (!jobs || !jobs.length) { box.style.display = 'none'; return; }
+
+        const processingJobs = jobs.filter(j => j.status === 'processing');
+        const failed = jobs.filter(j => j.status === 'error');
+
+        if (processingJobs.length) {
+          jobStatusSawProcessing = true;
+          if (!jobStatusPoll) jobStatusPoll = setInterval(refreshJobStatus, 5000);
+        } else if (jobStatusPoll) {
+          clearInterval(jobStatusPoll);
+          jobStatusPoll = null;
+          if (jobStatusSawProcessing) {
+            // Un job qui était en cours vient de se terminer : les nouveaux
+            // clips ne sont pas dans la grille déjà rendue, on recharge.
+            location.reload();
+            return;
+          }
+        }
+
         let html = '';
-        if (processing) {
-          html += `<div style="background:rgba(139,92,246,.1);border:1px solid #3a2a55;border-radius:12px;padding:14px 16px;font-size:13px;color:#c4b5fd;margin-bottom:10px;">⏳ ${processing} génération${processing > 1 ? 's' : ''} en cours… Les clips apparaîtront ici automatiquement une fois le traitement terminé (recharge la page dans quelques minutes).</div>`;
+        if (processingJobs.length) {
+          const current = processingJobs[0]; // le plus récent (déjà trié desc)
+          const pct = Math.max(0, Math.min(100, current.progress ?? 0));
+          const label = JOB_STAGE_LABELS[current.stage] ?? 'Traitement en cours...';
+          const extra = processingJobs.length > 1 ? ` (+${processingJobs.length - 1} en attente)` : '';
+          html += `<div style="background:rgba(139,92,246,.1);border:1px solid #3a2a55;border-radius:12px;padding:14px 16px;margin-bottom:10px;">
+            <div style="font-size:13px;color:#c4b5fd;margin-bottom:8px;">⏳ ${label}${extra}</div>
+            <div style="height:6px;border-radius:9999px;background:#1c1c24;overflow:hidden;">
+              <div style="height:100%;width:${pct}%;border-radius:9999px;background:linear-gradient(90deg,#f43f8e,#c4b5fd);transition:width 0.6s ease;"></div>
+            </div>
+          </div>`;
         }
         if (failed.length) {
-          const reason = (failed[0].error || 'raison inconnue').toString().slice(0, 300);
           html += `<div style="background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.4);border-radius:12px;padding:14px 16px;font-size:13px;color:#fca5a5;">⚠️ La dernière génération a échoué : <span style="color:#fecaca;"></span>. Tes minutes ont été recréditées, tu peux réessayer.</div>`;
-          box.innerHTML = html;
-          // On insère la raison via textContent pour éviter toute injection.
-          box.querySelector('span').textContent = reason;
-        } else {
-          box.innerHTML = html;
         }
-        if (html) box.style.display = 'block';
+        box.innerHTML = html;
+        if (failed.length) {
+          // On insère la raison via textContent pour éviter toute injection.
+          box.querySelector('span').textContent = (failed[0].error || 'raison inconnue').toString().slice(0, 300);
+        }
+        box.style.display = html ? 'block' : 'none';
+      } catch (e) {
+        console.warn('État des générations indisponible :', e);
       }
-    } catch (e) {
-      console.warn('État des générations indisponible :', e);
     }
+
+    await refreshJobStatus();
 
     const { data: clips, error } = await supabase
       .from('clips')
