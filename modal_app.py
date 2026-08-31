@@ -117,6 +117,15 @@ def _download_source_to(supabase, source_path: str, local_path: str) -> None:
         data = supabase.storage.from_(SOURCE_BUCKET).download(source_path)
         Path(local_path).write_bytes(data)
 
+
+def _upload_source_to_r2(local_path: str, source_path: str) -> None:
+    """Upload une source vidéo vers Cloudflare R2. `source_path` doit porter
+    le préfixe "r2:" (voir _download_source_to) — utilisé pour persister la
+    source d'une vidéo importée par lien YouTube (contourne le plafond
+    d'upload de Supabase Storage, comme pour l'import direct d'un fichier)."""
+    key = source_path[len("r2:"):] if source_path.startswith("r2:") else source_path
+    _r2_client().upload_file(local_path, os.environ["R2_BUCKET_NAME"], key)
+
 # Réalisateur LLM (cadrages/emphases auto sur chaque clip via le moteur EDL).
 # DÉSACTIVÉ par défaut : c'est un appel LLM supplémentaire par clip (~1-2 c/clip).
 # Passe à True pour activer les zooms automatiques sur les punchlines.
@@ -1812,17 +1821,17 @@ def process_video(user_id: str, source_path: str, youtube_url: str | None = None
                     enforce_source_caps(plan, yt_duration)
 
                 download_youtube(youtube_url, local_video, allow_proxy=allow_proxy)
-                # On PERSISTE la source téléchargée dans le bucket, pour que les
-                # clips restent AJUSTABLES ensuite (l'ajustement / la timeline
-                # re-rendent depuis l'EDL + la source). Sans ça, la source
-                # n'existe que sur le disque éphémère du worker et disparaît :
-                # tout ajustement échouerait. Le nettoyage périodique des
-                # sources (cleanup_old_sources) s'en occupe après 30 j.
+                # On PERSISTE la source téléchargée sur Cloudflare R2 (pas
+                # Supabase Storage, plafonné à 50 Mo sur le plan gratuit —
+                # même contournement que pour l'import direct d'un fichier),
+                # pour que les clips restent AJUSTABLES ensuite (l'ajustement
+                # / la timeline re-rendent depuis l'EDL + la source). Sans
+                # ça, la source n'existe que sur le disque éphémère du
+                # worker et disparaît : tout ajustement échouerait. La
+                # règle de cycle de vie R2 (voir cleanup_old_sources)
+                # s'en occupe après 30 j.
                 try:
-                    with open(local_video, "rb") as f:
-                        supabase.storage.from_(SOURCE_BUCKET).upload(
-                            source_path, f, {"content-type": "video/mp4", "upsert": "true"}
-                        )
+                    _upload_source_to_r2(local_video, source_path)
                 except Exception as exc:
                     print(f"[process_video] persistance de la source YouTube échouée "
                           f"(les clips ne seront pas ajustables) : {exc}")
@@ -2161,7 +2170,11 @@ def process():
                 preset = None
 
             youtube_url = payload.get("youtubeUrl")
-            source_path = (f"{user_id}/youtube_{int(time.time())}" if youtube_url
+            # Préfixe "r2:" dès la création : la source d'un lien YouTube est
+            # persistée sur Cloudflare R2 (voir _upload_source_to_r2 dans
+            # process_video), pas Supabase Storage, pour ne jamais buter sur
+            # son plafond de taille — même mécanisme que l'import direct.
+            source_path = (f"r2:{user_id}/youtube_{int(time.time())}" if youtube_url
                           else payload["path"])
             # Un chemin R2 (voir /upload_url) porte le préfixe "r2:" avant la
             # partie "user_id/..." — on l'ignore pour la vérification de
